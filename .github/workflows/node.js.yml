@@ -79,7 +79,8 @@ jobs:
 
       - name: 📦 Package Application
         run: |
-          tar -czf deployment.tar.gz -C build .
+          # Important: package the contents inside build/output, NOT build
+          tar -czf deployment.tar.gz -C build/output .
 
       - name: 🚀 Deploy to Server with Zero Downtime
         run: |
@@ -100,14 +101,11 @@ jobs:
 
           RELEASE_NAME=$(date +%Y%m%d%H%M%S)
 
-          # Create release directory
           ssh -F ssh_config remote-server "mkdir -p $DEPLOY_DIR/releases/$RELEASE_NAME"
 
-          # Upload build and env to new release folder
           scp -F ssh_config deployment.tar.gz remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/deployment.tar.gz
           scp -F ssh_config .env remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/.env
 
-          # Extract, install deps, and switch current symlink
           ssh -F ssh_config remote-server << EOF
             set -e
             cd $DEPLOY_DIR/releases/$RELEASE_NAME
@@ -115,9 +113,7 @@ jobs:
             rm deployment.tar.gz
             npm ci
 
-            # Update symlink atomically to new release
             ln -snf $DEPLOY_DIR/releases/$RELEASE_NAME $DEPLOY_DIR/current
 
-            # Reload or start app with PM2 pointing to current directory
             pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start --prefix $DEPLOY_DIR/current
           EOF
