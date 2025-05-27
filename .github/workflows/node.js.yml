@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: self-hosted
+
     steps:
       - name: ✅ Checkout Code
         uses: actions/checkout@v3
@@ -38,6 +39,7 @@ jobs:
   deploy:
     needs: build
     runs-on: self-hosted
+
     steps:
       - name: 📥 Download Build Artifact
         uses: actions/download-artifact@v4
@@ -59,7 +61,6 @@ jobs:
             echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
             echo "${{ secrets.PROD_ENV_SECRET }}" > .env
             echo "PORT=5005" >> .env
-
           elif [ "$BRANCH" = "dev" ]; then
             echo "DEPLOY_DIR=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
@@ -69,7 +70,6 @@ jobs:
             echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
             echo "${{ secrets.DEV_ENV_SECRET }}" > .env
             echo "PORT=5001" >> .env
-
           else
             echo "❌ Unknown branch: $BRANCH"
             exit 1
@@ -79,7 +79,10 @@ jobs:
 
       - name: 📦 Package Application
         run: |
-          tar -czf deployment.tar.gz -C build .
+          RELEASE_NAME=$(date +%Y%m%d%H%M%S)
+          mkdir -p build/$RELEASE_NAME
+          cp -r build/* build/$RELEASE_NAME/
+          tar -czf build/$RELEASE_NAME/deployment.tar.gz -C build/$RELEASE_NAME .
 
       - name: 🚀 Deploy to Server
         run: |
@@ -98,13 +101,14 @@ jobs:
             StrictHostKeyChecking no
           EOF
 
-          scp -F ssh_config deployment.tar.gz remote-server:$DEPLOY_DIR/deployment.tar.gz
-          scp -F ssh_config .env remote-server:$DEPLOY_DIR/.env
+          scp -F ssh_config build/$RELEASE_NAME/deployment.tar.gz remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/deployment.tar.gz
+          scp -F ssh_config .env remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/.env
 
           ssh -F ssh_config remote-server << EOF
-            cd $DEPLOY_DIR
+            cd $DEPLOY_DIR/releases/$RELEASE_NAME
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
             npm ci
             pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start
+            ln -snf $DEPLOY_DIR/releases/$RELEASE_NAME $DEPLOY_DIR/current
           EOF
