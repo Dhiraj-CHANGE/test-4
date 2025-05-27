@@ -38,7 +38,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: 📥 Download Build Artifact
@@ -83,13 +83,33 @@ jobs:
 
       - name: 🚀 Deploy to Server
         run: |
-          export SSH_AUTH_SOCK=none
-          scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
-          scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
-          ssh -p $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no $REMOTE_USER@$SERVER << EOF
-            cd $DEPLOY_DIR
-            tar -xzf deployment.tar.gz
-            rm deployment.tar.gz
-            npm ci
-            pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start
+          # Disable SSH agent forwarding to prevent too many auth attempts
+          unset SSH_AUTH_SOCK
+          export SSH_AUTH_SOCK=
+
+          # Upload deployment archive
+          scp -P $SSH_PORT -i private_key \
+            -o IdentitiesOnly=yes \
+            -o PreferredAuthentications=publickey \
+            -o StrictHostKeyChecking=no \
+            deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
+
+          # Upload .env file
+          scp -P $SSH_PORT -i private_key \
+            -o IdentitiesOnly=yes \
+            -o PreferredAuthentications=publickey \
+            -o StrictHostKeyChecking=no \
+            .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
+
+          # Connect and deploy remotely
+          ssh -p $SSH_PORT -i private_key \
+            -o IdentitiesOnly=yes \
+            -o PreferredAuthentications=publickey \
+            -o StrictHostKeyChecking=no \
+            $REMOTE_USER@$SERVER << EOF
+              cd $DEPLOY_DIR
+              tar -xzf deployment.tar.gz
+              rm deployment.tar.gz
+              npm ci
+              pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start
           EOF
