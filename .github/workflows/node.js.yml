@@ -1,380 +1,398 @@
-name: Deploy Next.js App
+name: ⚡ Fast Deploy
 
 on:
   push:
-    branches:
-      - main
-      - dev
+    branches: [main, dev]
 
 env:
   NODE_VERSION: '18'
-  ARTIFACT_RETENTION_DAYS: 3
 
 jobs:
   build:
     runs-on: self-hosted
     outputs:
-      deployment-id: ${{ steps.deployment-id.outputs.id }}
+      deployment-id: ${{ steps.meta.outputs.deployment-id }}
+      cache-key: ${{ steps.meta.outputs.cache-key }}
     steps:
-      - name: ✅ Checkout Code
+      - name: 📋 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔧 Set up Node.js
+      - name: 📊 Generate Metadata
+        id: meta
+        run: |
+          DEPLOYMENT_ID="$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
+          CACHE_KEY="build-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('package-lock.json') }}"
+          echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
+          echo "🆔 Deployment ID: $DEPLOYMENT_ID"
+
+      - name: ⚡ Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      - name: 📋 Generate Deployment ID
-        id: deployment-id
-        run: echo "id=$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+      - name: 📦 Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            .next/cache
+          key: ${{ steps.meta.outputs.cache-key }}
+          restore-keys: |
+            build-${{ runner.os }}-node${{ env.NODE_VERSION }}-
 
-      - name: ⚙️ Install Dependencies
+      - name: 🔧 Install Dependencies
         run: |
-          npm ci --prefer-offline --no-audit
-          echo "✅ Dependencies installed successfully"
+          npm ci --prefer-offline --no-audit --progress=false
+          echo "✅ Dependencies installed"
 
       - name: 🏗️ Build Application
         run: |
           npm run build
-          echo "✅ Application built successfully"
+          echo "✅ Build completed"
 
-      - name: 📦 Prepare Production Files
+      - name: 📦 Create Optimized Package
         run: |
-          set -e
+          # Create minimal production package
+          mkdir -p dist
           
-          # Create output directory
-          mkdir -p output
+          # Copy Next.js build output for Pages Router
+          cp -r .next dist/
+          cp -r pages dist/ 2>/dev/null || echo "No pages directory found"
+          cp -r public dist/ 2>/dev/null || echo "No public directory found"
+          cp package.json package-lock.json dist/
           
-          # Copy built application
-          cp -r .next output/
+          # Copy other essential directories for Pages Router
+          [ -d "styles" ] && cp -r styles dist/ || echo "No styles directory"
+          [ -d "components" ] && cp -r components dist/ || echo "No components directory"
+          [ -d "lib" ] && cp -r lib dist/ || echo "No lib directory"
+          [ -d "utils" ] && cp -r utils dist/ || echo "No utils directory"
+          [ -d "hooks" ] && cp -r hooks dist/ || echo "No hooks directory"
           
-          # Copy public directory if it exists
-          if [ -d "public" ]; then
-            cp -r public output/
-            echo "✅ Public directory copied"
-          else
-            echo "ℹ️ No public directory found"
-          fi
+          # Copy Next.js config if it exists
+          [ -f "next.config.js" ] && cp next.config.js dist/ || echo "No next.config.js"
+          [ -f "next.config.mjs" ] && cp next.config.mjs dist/ || echo "No next.config.mjs"
           
-          # Copy package files
-          cp package.json package-lock.json output/
-          
-          # Create optimized package.json for production
+          # Create minimal package.json for Pages Router
           node -e "
             const pkg = require('./package.json');
-            const prodPkg = {
+            const minimal = {
               name: pkg.name,
               version: pkg.version,
-              private: pkg.private,
-              scripts: {
-                start: 'next start'
+              scripts: { 
+                start: 'next start',
+                build: 'next build'
               },
               dependencies: pkg.dependencies
             };
-            require('fs').writeFileSync('output/package.json', JSON.stringify(prodPkg, null, 2));
-            console.log('✅ Production package.json created');
+            require('fs').writeFileSync('dist/package.json', JSON.stringify(minimal, null, 2));
           "
           
-          # Install production dependencies
-          cd output
-          npm ci --production --prefer-offline --no-audit
-          cd ..
+          # Install only production deps
+          cd dist && npm ci --production --prefer-offline --no-audit --progress=false
           
-          # Create deployment info
-          cat > output/deployment-info.json << EOF
+          # Create deployment manifest
+          cat > deployment.json << EOF
           {
-            "deploymentId": "${{ steps.deployment-id.outputs.id }}",
+            "id": "${{ steps.meta.outputs.deployment-id }}",
             "branch": "${GITHUB_REF##*/}",
             "commit": "${GITHUB_SHA}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "nodeVersion": "${{ env.NODE_VERSION }}"
+            "size": "$(du -sh dist | cut -f1)",
+            "router": "pages"
           }
           EOF
           
-          echo "✅ Production files prepared successfully"
+          echo "📦 Package size: $(du -sh dist | cut -f1)"
 
-      - name: 📤 Upload Build Artifact
+      - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: next-build-${{ steps.deployment-id.outputs.id }}
-          path: output
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-          compression-level: 9
+          name: app-${{ steps.meta.outputs.deployment-id }}
+          path: |
+            dist
+            deployment.json
+          retention-days: 1
+          compression-level: 6
 
   deploy:
     needs: build
     runs-on: self-hosted
     environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
     steps:
-      - name: 📥 Download Build Artifact
+      - name: 📥 Download Artifact
         uses: actions/download-artifact@v4
         with:
-          name: next-build-${{ needs.build.outputs.deployment-id }}
-          path: build
+          name: app-${{ needs.build.outputs.deployment-id }}
 
-      - name: ⚙️ Configure Deployment Environment
-        id: config
+      - name: ⚙️ Setup Environment
+        id: env
         run: |
-          set -e
-          
           BRANCH=${GITHUB_REF##*/}
-          DEPLOYMENT_ID="${{ needs.build.outputs.deployment-id }}"
-          
-          # Create secure temporary directory
-          TEMP_DIR=$(mktemp -d)
-          echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
           
           if [ "$BRANCH" = "main" ]; then
-            echo "🚀 Configuring PRODUCTION deployment"
-            echo "DEPLOY_DIR=/var/www/testing/_work/test-4" >> $GITHUB_ENV
-            echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
-            echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
-            echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PORT=5005" >> $GITHUB_ENV
-            echo "ENVIRONMENT=production" >> $GITHUB_ENV
-            
-            # Setup SSH key
-            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > "$TEMP_DIR/ssh_key"
-            echo "${{ secrets.PROD_ENV_SECRET }}" > "$TEMP_DIR/.env.production"
-            
-          elif [ "$BRANCH" = "dev" ]; then
-            echo "🧪 Configuring DEVELOPMENT deployment"
-            echo "DEPLOY_DIR=/var/www/testing/_work/test-4-dev" >> $GITHUB_ENV
-            echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
-            echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
-            echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PORT=5001" >> $GITHUB_ENV
-            echo "ENVIRONMENT=development" >> $GITHUB_ENV
-            
-            # Setup SSH key
-            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > "$TEMP_DIR/ssh_key"
-            echo "${{ secrets.DEV_ENV_SECRET }}" > "$TEMP_DIR/.env.production"
-            
+            cat >> $GITHUB_ENV << EOF
+          DEPLOY_PATH=/var/www/test-4
+          SERVER=${{ secrets.PROD_SERVER_HOST }}
+          USER=${{ secrets.PROD_SERVER_USER }}
+          PORT_SSH=${{ secrets.PROD_SSH_PORT }}
+          PORT_APP=5005
+          PROCESS_NAME=test-4-prod
+          ENV_VARS=${{ secrets.PROD_ENV_SECRET }}
+          SSH_KEY=${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          EOF
           else
-            echo "❌ Unsupported branch: $BRANCH"
-            exit 1
+            cat >> $GITHUB_ENV << EOF
+          DEPLOY_PATH=/var/www/test-4-dev
+          SERVER=${{ secrets.DEV_SERVER_HOST }}
+          USER=${{ secrets.DEV_SERVER_USER }}
+          PORT_SSH=${{ secrets.DEV_SSH_PORT }}
+          PORT_APP=5001
+          PROCESS_NAME=test-4-dev
+          ENV_VARS=${{ secrets.DEV_ENV_SECRET }}
+          SSH_KEY=${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          EOF
           fi
           
-          # Set secure permissions
-          chmod 600 "$TEMP_DIR/ssh_key" "$TEMP_DIR/.env.production"
-          
-          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
-          echo "✅ Environment configured for $ENVIRONMENT"
+          echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
 
-      - name: 🔐 Setup SSH Configuration
+      - name: 🔐 Setup SSH
         run: |
-          set -e
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
           
-          # Create SSH config
-          cat > "$TEMP_DIR/ssh_config" << EOF
-          Host deploy-server
+          cat > ~/.ssh/config << EOF
+          Host deploy
             HostName $SERVER
-            User $REMOTE_USER
-            Port $SSH_PORT
-            IdentityFile $TEMP_DIR/ssh_key
-            IdentitiesOnly yes
+            User $USER
+            Port $PORT_SSH
+            IdentityFile ~/.ssh/deploy_key
             StrictHostKeyChecking no
             ServerAliveInterval 30
-            ServerAliveCountMax 3
             ConnectTimeout 10
-            BatchMode yes
           EOF
-          
-          chmod 600 "$TEMP_DIR/ssh_config"
-          echo "✅ SSH configuration created"
 
-      - name: 📦 Create Deployment Package
+      - name: 🚀 Lightning Deploy
         run: |
-          set -e
-          
-          # Copy environment file to build
-          cp "$TEMP_DIR/.env.production" build/
-          
           # Create deployment package
-          cd build
-          tar -czf "$TEMP_DIR/deployment.tar.gz" .
-          cd ..
+          tar -czf app.tar.gz dist deployment.json
           
-          # Verify package
-          if [ ! -f "$TEMP_DIR/deployment.tar.gz" ]; then
-            echo "❌ Failed to create deployment package"
-            exit 1
-          fi
-          
-          PACKAGE_SIZE=$(du -h "$TEMP_DIR/deployment.tar.gz" | cut -f1)
-          echo "✅ Deployment package created (Size: $PACKAGE_SIZE)"
-
-      - name: 🚀 Deploy with Zero Downtime
-        run: |
-          set -e
-          
-          SSH_CMD="ssh -F $TEMP_DIR/ssh_config deploy-server"
-          SCP_CMD="scp -F $TEMP_DIR/ssh_config"
-          
-          echo "🔍 Testing server connection..."
-          if ! $SSH_CMD "echo 'Connection successful'"; then
-            echo "❌ Failed to connect to server"
-            exit 1
-          fi
-          
-          echo "📁 Creating release directory..."
-          $SSH_CMD "mkdir -p $DEPLOY_DIR/releases/$DEPLOYMENT_ID"
-          
-          echo "📤 Uploading deployment package..."
-          $SCP_CMD "$TEMP_DIR/deployment.tar.gz" deploy-server:$DEPLOY_DIR/releases/$DEPLOYMENT_ID/
-          
-          echo "🔧 Deploying application..."
-          $SSH_CMD << EOF
+          # Deploy with optimized script
+          ssh deploy << 'DEPLOY_SCRIPT'
             set -e
-            cd $DEPLOY_DIR/releases/$DEPLOYMENT_ID
             
-            # Extract deployment package
-            echo "📦 Extracting files..."
-            tar -xzf deployment.tar.gz
-            rm deployment.tar.gz
+            # Setup paths
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
+            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
+            CURRENT_PATH="$DEPLOY_PATH/current"
             
-            # Create PM2 ecosystem file
-            echo "⚙️ Creating PM2 configuration..."
-            cat > ecosystem.config.js << EOL
+            echo "🏗️ Setting up release directory..."
+            mkdir -p "$RELEASE_PATH" "$DEPLOY_PATH/shared/logs"
+            
+          DEPLOY_SCRIPT
+          
+          # Upload and extract
+          echo "📤 Uploading package..."
+          scp app.tar.gz deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/
+          
+          # Continue deployment
+          ssh deploy << 'DEPLOY_SCRIPT'
+            set -e
+            
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
+            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
+            CURRENT_PATH="$DEPLOY_PATH/current"
+            APP_PATH="$RELEASE_PATH/dist"
+            
+            cd "$RELEASE_PATH"
+            
+            echo "📦 Extracting package..."
+            tar -xzf app.tar.gz && rm app.tar.gz
+            
+            # Create environment file
+            cat > "$APP_PATH/.env.production" << 'ENV_EOF'
+          ${{ env.ENV_VARS }}
+          PORT=${{ env.PORT_APP }}
+          NODE_ENV=production
+          ENV_EOF
+            
+            # Create optimized PM2 ecosystem for Pages Router
+            cat > "$RELEASE_PATH/ecosystem.config.js" << EOF
           module.exports = {
             apps: [{
-              name: '$PROCESS_NAME',
-              script: './node_modules/.bin/next',
+              name: '${{ env.PROCESS_NAME }}',
+              script: '$APP_PATH/node_modules/.bin/next',
               args: 'start',
-              cwd: '$DEPLOY_DIR/current',
-              env: {
-                NODE_ENV: 'production',
-                PORT: '$PORT'
-              },
+              cwd: '$APP_PATH',
               instances: 1,
               exec_mode: 'cluster',
-              max_memory_restart: '1G',
-              min_uptime: '10s',
+              env: {
+                NODE_ENV: 'production',
+                PORT: '${{ env.PORT_APP }}',
+                PWD: '$APP_PATH',
+                NEXT_TELEMETRY_DISABLED: '1'
+              },
+              max_memory_restart: '512M',
+              min_uptime: '15s',
               max_restarts: 5,
-              error_file: '$DEPLOY_DIR/logs/\$PROCESS_NAME-error.log',
-              out_file: '$DEPLOY_DIR/logs/\$PROCESS_NAME-out.log',
-              log_file: '$DEPLOY_DIR/logs/\$PROCESS_NAME.log',
-              time: true,
               autorestart: true,
               watch: false,
-              ignore_watch: ['node_modules', 'logs'],
-              env_production: {
-                NODE_ENV: 'production',
-                PORT: '$PORT'
-              }
+              kill_timeout: 5000,
+              wait_ready: true,
+              listen_timeout: 20000,
+              error_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-error.log',
+              out_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-out.log',
+              log_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}.log',
+              time: true,
+              merge_logs: true,
+              source_map_support: true
             }]
           };
-          EOL
+          EOF
             
-            # Create necessary directories
-            mkdir -p $DEPLOY_DIR/logs
-            
-            # Health check function
+            # Enhanced health check for Pages Router
             health_check() {
-              local max_attempts=30
-              local attempt=1
+              local attempts=0
+              local max_attempts=40
+              local port=${{ env.PORT_APP }}
               
-              while [ \$attempt -le \$max_attempts ]; do
-                if curl -f -s http://localhost:$PORT/api/health > /dev/null 2>&1 || curl -f -s http://localhost:$PORT > /dev/null 2>&1; then
-                  echo "✅ Health check passed (attempt \$attempt)"
-                  return 0
+              echo "🔍 Starting health check for Pages Router on port $port..."
+              
+              while [ $attempts -lt $max_attempts ]; do
+                # Check if port is listening
+                if netstat -tuln | grep ":$port " > /dev/null 2>&1; then
+                  # Check if Pages Router API responds
+                  if curl -f -s --max-time 5 "http://localhost:$port/api/health" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (Pages Router API responding)"
+                    return 0
+                  elif curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (Pages Router home page responding)"
+                    return 0
+                  else
+                    echo "⚠️ Port listening but Pages Router not responding yet..."
+                  fi
+                else
+                  echo "⏳ Port $port not ready yet..."
                 fi
-                echo "⏳ Health check attempt \$attempt/\$max_attempts failed, retrying..."
-                sleep 2
-                attempt=\$((attempt + 1))
+                
+                attempts=$((attempts + 1))
+                echo "🔄 Attempt $attempts/$max_attempts..."
+                sleep 3
               done
               
-              echo "❌ Health check failed after \$max_attempts attempts"
+              echo "❌ Health check failed after $max_attempts attempts"
+              echo "🔍 Checking PM2 logs..."
+              pm2 logs ${{ env.PROCESS_NAME }} --lines 10 || true
               return 1
             }
             
-            # Backup current symlink if it exists
-            if [ -L "$DEPLOY_DIR/current" ]; then
-              BACKUP_RELEASE=\$(readlink $DEPLOY_DIR/current)
-              echo "💾 Backup release: \$BACKUP_RELEASE"
+            # Backup current if exists
+            BACKUP_PATH=""
+            if [ -L "$CURRENT_PATH" ]; then
+              BACKUP_PATH=$(readlink "$CURRENT_PATH")
+              echo "💾 Backup: $BACKUP_PATH"
             fi
             
-            # Update symlink atomically
+            # Stop existing process if running
+            if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
+              echo "🛑 Stopping existing process..."
+              pm2 stop ${{ env.PROCESS_NAME }}
+              sleep 2
+            fi
+            
+            # Atomic switch
             echo "🔄 Switching to new release..."
-            ln -snf $DEPLOY_DIR/releases/$DEPLOYMENT_ID $DEPLOY_DIR/current
+            ln -snf "$RELEASE_PATH" "$CURRENT_PATH"
             
-            # Deploy with PM2
-            if pm2 describe $PROCESS_NAME > /dev/null 2>&1; then
-              echo "🔄 Reloading existing PM2 process..."
-              pm2 reload ecosystem.config.js --env production
-            else
-              echo "🚀 Starting new PM2 process..."
-              pm2 start ecosystem.config.js --env production
-            fi
+            # Start PM2 process
+            cd "$CURRENT_PATH"
+            echo "🚀 Starting PM2 process..."
+            pm2 start ecosystem.config.js
             
-            # Wait for application to start
+            # Wait for process to initialize
+            echo "⏳ Waiting for application to start..."
             sleep 5
             
-            # Perform health check
             if health_check; then
-              echo "✅ Deployment successful!"
+              echo "🎉 Deployment successful!"
               pm2 save
               
-              # Clean up old releases (keep last 5)
+              # Cleanup old releases (keep 3)
               echo "🧹 Cleaning up old releases..."
-              cd $DEPLOY_DIR/releases
-              ls -t | tail -n +6 | xargs -r rm -rf
-              echo "✅ Cleanup completed"
+              cd "$DEPLOY_PATH/releases"
+              ls -t | tail -n +4 | xargs -r rm -rf
+              
+              echo "📊 Final PM2 status:"
+              pm2 status ${{ env.PROCESS_NAME }}
               
             else
-              echo "❌ Health check failed, rolling back..."
-              if [ -n "\$BACKUP_RELEASE" ] && [ -d "\$BACKUP_RELEASE" ]; then
-                ln -snf \$BACKUP_RELEASE $DEPLOY_DIR/current
-                pm2 reload ecosystem.config.js --env production
-                echo "🔄 Rollback completed"
+              echo "❌ Deployment failed, attempting rollback..."
+              
+              # Stop failed process
+              pm2 stop ${{ env.PROCESS_NAME }} || true
+              pm2 delete ${{ env.PROCESS_NAME }} || true
+              
+              if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
+                echo "🔄 Rolling back to: $BACKUP_PATH"
+                ln -snf "$BACKUP_PATH" "$CURRENT_PATH"
+                cd "$CURRENT_PATH"
+                pm2 start ecosystem.config.js
+                echo "✅ Rollback completed"
+              else
+                echo "⚠️ No backup available"
               fi
+              
               exit 1
             fi
-          EOF
-          
-          echo "🎉 Deployment completed successfully!"
+          DEPLOY_SCRIPT
 
-      - name: 📊 Post-Deployment Verification
+      - name: 🔍 Verify Deployment
         run: |
-          set -e
-          
-          SSH_CMD="ssh -F $TEMP_DIR/ssh_config deploy-server"
-          
-          echo "🔍 Verifying deployment..."
-          
-          # Check PM2 status
-          $SSH_CMD "pm2 status $PROCESS_NAME"
-          
-          # Check if application is responding
-          if $SSH_CMD "curl -f -s http://localhost:$PORT > /dev/null"; then
-            echo "✅ Application is responding correctly"
-          else
-            echo "⚠️ Application health check warning"
-          fi
-          
-          # Display deployment info
-          $SSH_CMD "cat $DEPLOY_DIR/current/deployment-info.json" || echo "ℹ️ Deployment info not available"
+          ssh deploy << 'VERIFY_SCRIPT'
+            echo "📊 PM2 Status:"
+            pm2 status ${{ env.PROCESS_NAME }}
+            
+            echo ""
+            echo "🌐 Application Status:"
+            if curl -f -s --max-time 5 http://localhost:${{ env.PORT_APP }} > /dev/null; then
+              echo "✅ Application is responding correctly"
+            else
+              echo "❌ Application is not responding"
+              echo "🔍 Recent logs:"
+              pm2 logs ${{ env.PROCESS_NAME }} --lines 5
+            fi
+            
+            echo ""
+            echo "📋 Deployment Info:"
+            cat ${{ env.DEPLOY_PATH }}/current/deployment.json 2>/dev/null || echo "No deployment info available"
+            
+            echo ""
+            echo "💾 Disk Usage:"
+            du -sh ${{ env.DEPLOY_PATH }}/releases/* 2>/dev/null | tail -3 || echo "No releases found"
+          VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
         if: always()
         run: |
-          if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
-            rm -rf "$TEMP_DIR"
-            echo "✅ Temporary files cleaned up"
-          fi
+          rm -f ~/.ssh/deploy_key app.tar.gz 2>/dev/null || true
 
-      - name: 📢 Deployment Notification
-        if: always()
+  notify:
+    needs: [build, deploy]
+    runs-on: self-hosted
+    if: always()
+    steps:
+      - name: 📢 Deployment Status
         run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            echo "🎉 Deployment to $ENVIRONMENT completed successfully!"
-            echo "📋 Deployment ID: $DEPLOYMENT_ID"
-            echo "🌐 Environment: $ENVIRONMENT"
-            echo "🔗 Server: $SERVER:$PORT"
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "🎉 Deployment successful!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+            echo "⏱️ Total time: ${{ github.event.head_commit.timestamp }}"
           else
-            echo "❌ Deployment to $ENVIRONMENT failed!"
-            echo "📋 Deployment ID: $DEPLOYMENT_ID"
+            echo "❌ Deployment failed!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🔍 Check the logs above for details"
           fi
