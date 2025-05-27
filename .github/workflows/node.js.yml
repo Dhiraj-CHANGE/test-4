@@ -22,24 +22,35 @@ jobs:
       - name: ⚙️ Install Dependencies
         run: npm ci
 
-      # - name: 🧪 Run Tests
-      #   run: npm test
-
       - name: 🏗️ Build Application
         run: npm run build
+
+      - name: 📦 Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-build
+          path: |
+            .next
+            public
+            package.json
+            package-lock.json
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - name: ✅ Checkout Code
-        uses: actions/checkout@v3
+      - name: 📥 Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: build
 
       - name: 🔧 Set Deployment Variables
         id: set-vars
         run: |
           BRANCH=${GITHUB_REF##*/}
+
           if [ "$BRANCH" = "main" ]; then
             echo "DEPLOY_DIR=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
@@ -62,20 +73,22 @@ jobs:
             echo "Unknown branch: $BRANCH"
             exit 1
           fi
+
           chmod 600 private_key .env
 
       - name: 📦 Package Application
         run: |
-          tar -czf deployment.tar.gz .next public package.json package-lock.json
+          cd build
+          tar -czf ../deployment.tar.gz .next public package.json package-lock.json
 
       - name: 🚀 Deploy to Server
         run: |
           scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
-          ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << 'EOF'
+          scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
+          ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << EOF
             cd $DEPLOY_DIR
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
-            cd $DEPLOY_DIR
             npm ci
             pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start
           EOF
