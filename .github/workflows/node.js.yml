@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     runs-on: self-hosted
-
     steps:
       - name: ✅ Checkout Code
         uses: actions/checkout@v3
@@ -39,7 +38,6 @@ jobs:
   deploy:
     needs: build
     runs-on: self-hosted
-
     steps:
       - name: 📥 Download Build Artifact
         uses: actions/download-artifact@v4
@@ -47,7 +45,7 @@ jobs:
           name: next-build
           path: build
 
-      - name: 🔧 Set Deployment Variables and Prepare SSH Key
+      - name: ⚙️ Set Deployment Variables and Prepare SSH Key
         id: set-vars
         run: |
           BRANCH=${GITHUB_REF##*/}
@@ -58,24 +56,26 @@ jobs:
             echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
+            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
             echo "${{ secrets.PROD_ENV_SECRET }}" > .env
             echo "PORT=5005" >> .env
+
           elif [ "$BRANCH" = "dev" ]; then
             echo "DEPLOY_DIR=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
+            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
             echo "${{ secrets.DEV_ENV_SECRET }}" > .env
             echo "PORT=5001" >> .env
+
           else
-            echo "Unknown branch: $BRANCH"
+            echo "❌ Unknown branch: $BRANCH"
             exit 1
           fi
 
-          chmod 600 private_key .env
+          chmod 600 id_rsa .env
 
       - name: 📦 Package Application
         run: |
@@ -86,13 +86,14 @@ jobs:
           unset SSH_AUTH_SOCK
           export SSH_AUTH_SOCK=
 
-          # Create SSH config to avoid multiple auth attempts
+          chmod 600 id_rsa
+
           cat > ssh_config << EOF
           Host remote-server
             HostName $SERVER
             User $REMOTE_USER
             Port $SSH_PORT
-            IdentityFile $(pwd)/private_key
+            IdentityFile $(pwd)/id_rsa
             IdentitiesOnly yes
             StrictHostKeyChecking no
           EOF
