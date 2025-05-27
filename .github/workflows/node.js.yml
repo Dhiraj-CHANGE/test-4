@@ -27,6 +27,7 @@ jobs:
             echo "PROCESS_NAME=${{ vars.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
+            echo "DEPLOY_HOST_DIR=${{ secrets.PROD_SERVER_DEPLOYMENT_PATH }}" >> $GITHUB_ENV
             echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
             echo "${{ secrets.PROD_ENV_SECRET }}" > .env
             echo "PORT=5001" >> .env
@@ -36,6 +37,7 @@ jobs:
             echo "SERVER=${{ vars.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ vars.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
+            echo "DEPLOY_HOST_DIR=${{ secrets.DEV_SERVER_DEPLOYMENT_PATH }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
             echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
             echo "${{ secrets.DEV_ENV_SECRET }}" > .env
@@ -93,6 +95,6 @@ jobs:
           ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << 'EOF'
             cd $DEPLOY_DIR
             npm ci
-            rsync -av --remove-source-files $DEPLOY_DIR/ /var/www/testing/current/test-4/
-            cd /var/www/testing/current/test-4
+            rsync -av --remove-source-files $DEPLOY_DIR/ $DEPLOY_HOST_DIR/
+            cd $DEPLOY_HOST_DIR
           EOF
