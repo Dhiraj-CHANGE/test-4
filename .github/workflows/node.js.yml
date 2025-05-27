@@ -83,9 +83,9 @@ jobs:
 
       - name: 🚀 Deploy to Server
         run: |
-          scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
-          scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
-          ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << EOF
+          scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
+          scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
+          ssh -p $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no $REMOTE_USER@$SERVER << EOF
             cd $DEPLOY_DIR
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
