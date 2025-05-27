@@ -11,12 +11,13 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: ✅ Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🔧 Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
 
       - name: ⚙️ Install Dependencies
         run: npm ci
@@ -27,13 +28,25 @@ jobs:
       - name: 📦 Prepare Files for Upload
         run: |
           mkdir -p output
-          cp -r .next public package.json package-lock.json output/
+          # Copy essential files for production
+          cp -r .next output/
+          cp -r public output/ 2>/dev/null || echo "No public directory found"
+          cp package.json output/
+          cp package-lock.json output/
+          # Copy node_modules for production dependencies only
+          npm ci --production --prefix output
+          # Create a simple start script
+          echo '{"scripts":{"start":"next start"}}' > output/package.json.tmp
+          jq -s '.[0] * .[1]' output/package.json output/package.json.tmp > output/package.json.new
+          mv output/package.json.new output/package.json
+          rm output/package.json.tmp
 
       - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: next-build
+          name: next-build-${{ github.sha }}
           path: output
+          retention-days: 1
 
   deploy:
     needs: build
@@ -42,78 +55,145 @@ jobs:
       - name: 📥 Download Build Artifact
         uses: actions/download-artifact@v4
         with:
-          name: next-build
+          name: next-build-${{ github.sha }}
           path: build
 
-      - name: ⚙️ Set Deployment Variables and Prepare SSH Key
+      - name: ⚙️ Set Deployment Variables
         id: set-vars
         run: |
           BRANCH=${GITHUB_REF##*/}
-
+          
+          # Create SSH key file
+          mkdir -p ~/.ssh
+          
           if [ "$BRANCH" = "main" ]; then
             echo "DEPLOY_DIR=/var/www/testing/_work/test-4" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
-            echo "${{ secrets.PROD_ENV_SECRET }}" > .env
-            echo "PORT=5005" >> .env
-
+            echo "PORT=5005" >> $GITHUB_ENV
+            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa_prod
+            echo "${{ secrets.PROD_ENV_SECRET }}" > .env.production
+            
           elif [ "$BRANCH" = "dev" ]; then
             echo "DEPLOY_DIR=/var/www/testing/_work/test-4" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
             echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
             echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > id_rsa
-            echo "${{ secrets.DEV_ENV_SECRET }}" > .env
-            echo "PORT=5001" >> .env
-
+            echo "PORT=5001" >> $GITHUB_ENV
+            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa_dev
+            echo "${{ secrets.DEV_ENV_SECRET }}" > .env.production
+            
           else
             echo "❌ Unknown branch: $BRANCH"
             exit 1
           fi
-
-          chmod 600 id_rsa .env
+          
+          # Set proper permissions
+          chmod 600 ~/.ssh/id_rsa_* 2>/dev/null || true
+          chmod 600 .env.production
 
       - name: 📦 Package Application
         run: |
-          # Important: package the contents inside build/output, NOT build
-          tar -czf deployment.tar.gz -C build/output .
+          # Add environment file to build
+          cp .env.production build/.env.production
+          # Package everything
+          tar -czf deployment.tar.gz -C build .
 
       - name: 🚀 Deploy to Server with Zero Downtime
         run: |
-          unset SSH_AUTH_SOCK
-          export SSH_AUTH_SOCK=
-
-          chmod 600 id_rsa
-
+          # Determine SSH key based on branch
+          BRANCH=${GITHUB_REF##*/}
+          if [ "$BRANCH" = "main" ]; then
+            SSH_KEY="~/.ssh/id_rsa_prod"
+          else
+            SSH_KEY="~/.ssh/id_rsa_dev"
+          fi
+          
+          # Create SSH config
           cat > ssh_config << EOF
           Host remote-server
             HostName $SERVER
             User $REMOTE_USER
             Port $SSH_PORT
-            IdentityFile $(pwd)/id_rsa
+            IdentityFile $SSH_KEY
             IdentitiesOnly yes
             StrictHostKeyChecking no
+            ServerAliveInterval 60
+            ServerAliveCountMax 3
           EOF
-
+          
           RELEASE_NAME=$(date +%Y%m%d%H%M%S)
-
+          
+          # Create release directory
           ssh -F ssh_config remote-server "mkdir -p $DEPLOY_DIR/releases/$RELEASE_NAME"
-
-          scp -F ssh_config deployment.tar.gz remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/deployment.tar.gz
-          scp -F ssh_config .env remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/.env
-
+          
+          # Upload files
+          scp -F ssh_config deployment.tar.gz remote-server:$DEPLOY_DIR/releases/$RELEASE_NAME/
+          
+          # Deploy on remote server
           ssh -F ssh_config remote-server << EOF
             set -e
             cd $DEPLOY_DIR/releases/$RELEASE_NAME
+            
+            # Extract files
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
-            npm ci
-
+            
+            # Create PM2 ecosystem file
+            cat > ecosystem.config.js << EOL
+          module.exports = {
+            apps: [{
+              name: '$PROCESS_NAME',
+              script: 'node_modules/.bin/next',
+              args: 'start',
+              cwd: '$DEPLOY_DIR/current',
+              env: {
+                NODE_ENV: 'production',
+                PORT: '$PORT'
+              },
+              instances: 1,
+              exec_mode: 'cluster',
+              max_memory_restart: '1G',
+              error_file: '$DEPLOY_DIR/logs/err.log',
+              out_file: '$DEPLOY_DIR/logs/out.log',
+              log_file: '$DEPLOY_DIR/logs/combined.log',
+              time: true
+            }]
+          };
+          EOL
+            
+            # Create logs directory
+            mkdir -p $DEPLOY_DIR/logs
+            
+            # Update symlink
             ln -snf $DEPLOY_DIR/releases/$RELEASE_NAME $DEPLOY_DIR/current
-
-            pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start --prefix $DEPLOY_DIR/current
+            
+            # Restart/start PM2 process
+            if pm2 describe $PROCESS_NAME > /dev/null 2>&1; then
+              echo "🔄 Reloading existing PM2 process..."
+              pm2 reload ecosystem.config.js --env production
+            else
+              echo "🚀 Starting new PM2 process..."
+              pm2 start ecosystem.config.js --env production
+            fi
+            
+            # Save PM2 configuration
+            pm2 save
+            
+            # Clean up old releases (keep last 5)
+            cd $DEPLOY_DIR/releases
+            ls -t | tail -n +6 | xargs -r rm -rf
+            
+            echo "✅ Deployment completed successfully!"
           EOF
+
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_rsa_* 2>/dev/null || true
+          rm -f .env.production 2>/dev/null || true
+          rm -f deployment.tar.gz 2>/dev/null || true
+          rm -f ssh_config 2>/dev/null || true
