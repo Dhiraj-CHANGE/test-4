@@ -30,7 +30,7 @@ jobs:
             echo "DEPLOY_HOST_DIR=${{ secrets.PROD_SERVER_DEPLOYMENT_PATH }}" >> $GITHUB_ENV
             echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
             echo "${{ secrets.PROD_ENV_SECRET }}" > .env
-            echo "PORT=5001" >> .env
+            echo "PORT=5005" >> .env
 
           elif [ "$BRANCH" = "dev" ]; then
             echo "DEPLOY_DIR=${{ vars.DEV_SERVER_PATH }}" >> $GITHUB_ENV
