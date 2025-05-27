@@ -1,4 +1,4 @@
-name: Testing CHANGE Admin CI/CD
+name: Deploy Next.js App
 
 on:
   push:
@@ -7,94 +7,75 @@ on:
       - dev
 
 jobs:
-  deploy:
+  build:
     runs-on: self-hosted
 
     steps:
-      # === CHECKOUT CODE ===
-      - name: "✅ Checkout Code"
+      - name: ✅ Checkout Code
         uses: actions/checkout@v3
 
-      # === SET DEPLOYMENT VARIABLES ===
-      - name: "🔧 Set Deployment Variables"
-        id: set-vars
-        run: |
-          BRANCH=${GITHUB_REF##*/}
-
-          if [ "$BRANCH" = "main" ]; then
-            echo "DEPLOY_DIR=${{ vars.PROD_SERVER_PATH }}" >> $GITHUB_ENV
-            echo "SERVER=${{ vars.PROD_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ vars.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
-            echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
-            echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "DEPLOY_HOST_DIR=${{ secrets.PROD_SERVER_DEPLOYMENT_PATH }}" >> $GITHUB_ENV
-            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
-            echo "${{ secrets.PROD_ENV_SECRET }}" > .env
-            echo "PORT=5005" >> .env
-
-          elif [ "$BRANCH" = "dev" ]; then
-            echo "DEPLOY_DIR=${{ vars.DEV_SERVER_PATH }}" >> $GITHUB_ENV
-            echo "SERVER=${{ vars.DEV_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ vars.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
-            echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
-            echo "DEPLOY_HOST_DIR=${{ secrets.DEV_SERVER_DEPLOYMENT_PATH }}" >> $GITHUB_ENV
-            echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
-            echo "${{ secrets.DEV_ENV_SECRET }}" > .env
-            echo "PORT=5001" >> .env
-
-          else
-            echo "Unknown branch: $BRANCH"
-            exit 1
-          fi
-
-          chmod 600 private_key .env
-
-      # === SETUP NODE.JS ===
-      - name: "🔧 Setup Node.js"
+      - name: 🔧 Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      # === CACHE NODE MODULES ===
-      - name: "♻️ Cache Node Modules"
-        uses: actions/cache@v3
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      # === INSTALL DEPENDENCIES ===
-      - name: "📦 Install Dependencies"
+      - name: ⚙️ Install Dependencies
         run: npm ci
 
-      # === BUILD APP ===
-      - name: "🏗️ Build Next.js App"
+      - name: 🧪 Run Tests
+        run: npm test
+
+      - name: 🏗️ Build Application
         run: npm run build
 
-      # === SCP FILES TO SERVER ===
-      - name: "🚀 SCP Files to Server"
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ✅ Checkout Code
+        uses: actions/checkout@v3
+
+      - name: 🔧 Set Deployment Variables
+        id: set-vars
+        run: |
+          BRANCH=${GITHUB_REF##*/}
+          if [ "$BRANCH" = "main" ]; then
+            echo "DEPLOY_DIR=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
+            echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
+            echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_ENV
+            echo "REMOTE_USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
+            echo "SSH_PORT=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
+            echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
+            echo "${{ secrets.PROD_ENV_SECRET }}" > .env
+            echo "PORT=5005" >> .env
+          elif [ "$BRANCH" = "dev" ]; then
+            echo "DEPLOY_DIR=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
+            echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
+            echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_ENV
+            echo "REMOTE_USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
+            echo "SSH_PORT=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
+            echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > private_key
+            echo "${{ secrets.DEV_ENV_SECRET }}" > .env
+            echo "PORT=5001" >> .env
+          else
+            echo "Unknown branch: $BRANCH"
+            exit 1
+          fi
+          chmod 600 private_key .env
+
+      - name: 📦 Package Application
         run: |
           tar -czf deployment.tar.gz .next public package.json package-lock.json
+
+      - name: 🚀 Deploy to Server
+        run: |
           scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
           ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << 'EOF'
             cd $DEPLOY_DIR
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
-          EOF
-
-      # === SCP ENV FILE ===
-      - name: "📝 Copy .env to Server"
-        run: |
-          scp -P $SSH_PORT -i private_key -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
-
-      # === SSH TO SERVER ===
-      - name: "⚙️ Run Remote Commands on Server"
-        run: |
-          ssh -p $SSH_PORT -o StrictHostKeyChecking=no -i private_key $REMOTE_USER@$SERVER << 'EOF'
             cd $DEPLOY_DIR
             npm ci
-            rsync -av --remove-source-files $DEPLOY_DIR/ $DEPLOY_HOST_DIR/
-            cd $DEPLOY_HOST_DIR
+            pm2 reload $PROCESS_NAME || pm2 start npm --name $PROCESS_NAME -- start
           EOF
