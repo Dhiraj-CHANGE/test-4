@@ -38,7 +38,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: 📥 Download Build Artifact
@@ -83,6 +83,7 @@ jobs:
 
       - name: 🚀 Deploy to Server
         run: |
+          export SSH_AUTH_SOCK=none
           scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no deployment.tar.gz $REMOTE_USER@$SERVER:$DEPLOY_DIR/deployment.tar.gz
           scp -P $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no .env $REMOTE_USER@$SERVER:$DEPLOY_DIR/.env
           ssh -p $SSH_PORT -i private_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no $REMOTE_USER@$SERVER << EOF
