@@ -1,4 +1,4 @@
-name: Testing  CHANGE Admin CI/CD
+name: Testing CHANGE Admin CI/CD
 
 on:
   push:
