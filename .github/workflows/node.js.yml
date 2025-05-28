@@ -60,30 +60,22 @@ jobs:
 
       - name: 📦 Create Deployment Package
         run: |
-          # Detect project structure (App Router vs Pages Router)
+          # Detect project structure
           if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
-            # Include app directory for App Router
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json
+            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.*
           elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
-            # Include pages directory for Pages Router
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.* 2>/dev/null || \
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json
+            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.*
           else
             echo "📂 Basic Next.js setup detected"
             ROUTER_TYPE="basic"
-            # Just include .next and public for basic setup
-            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.* 2>/dev/null || \
-            tar -czf deployment.tar.gz .next public package.json package-lock.json
+            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.*
           fi
           
-          # Create router type file for deployment script
           echo $ROUTER_TYPE > router-type.txt
-          
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
           echo "📂 Router type: $ROUTER_TYPE"
 
@@ -151,10 +143,10 @@ jobs:
 
       - name: 🚀 Zero-Downtime Deploy with Port Switching
         run: |
-          # Create staging directory on server first
+          # Create staging directory
           ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/staging"
           
-          # Upload deployment package with correct filenames
+          # Upload deployment package
           echo "📤 Uploading deployment package..."
           scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/deployment.tar.gz
           scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/router-type.txt
@@ -162,7 +154,7 @@ jobs:
           # Copy environment variables
           echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
           
-          # Execute zero-downtime deployment with port switching
+          # Execute deployment
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
@@ -191,7 +183,7 @@ jobs:
               CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
             fi
             
-            # If no current port found, default to 5005
+            # Default to 5005 if no port found
             if [ -z "$CURRENT_PORT" ]; then
               CURRENT_PORT="5005"
             fi
@@ -210,10 +202,10 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Install production dependencies
+            # Install production dependencies (CRITICAL FIX)
             echo "📦 Installing production dependencies..."
-            rm -rf node_modules package-lock.json 2>/dev/null || true
-            npm install --omit=dev --prefer-offline --no-audit --progress=false
+            rm -rf node_modules
+            npm ci --production --prefer-offline --no-audit --progress=false
             
             # Verify Next.js installation
             if [ ! -f "node_modules/.bin/next" ]; then
@@ -221,7 +213,6 @@ jobs:
               exit 1
             fi
             
-            # Verify critical Next.js modules
             if [ ! -d "node_modules/next/dist/compiled" ]; then
               echo "❌ Next.js compiled modules not found"
               exit 1
@@ -307,7 +298,7 @@ jobs:
             if health_check $NEW_PORT; then
               echo "✅ New process is healthy on port $NEW_PORT"
               
-              # Update Nginx upstream to point to new port
+              # Update Nginx upstream
               echo "🔄 Updating Nginx to point to port $NEW_PORT..."
               
               sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
