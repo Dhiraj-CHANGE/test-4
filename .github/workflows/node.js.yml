@@ -53,6 +53,29 @@ jobs:
             echo "📦 Using cached dependencies"
           fi
 
+      - name: 🔧 Convert Next.js Config
+        run: |
+          if [ -f "next.config.ts" ]; then
+            echo "📝 Converting next.config.ts to next.config.js..."
+            
+            # Read the content of next.config.ts
+            CONFIG_CONTENT=$(cat next.config.ts)
+            
+            # Create a backup of the original file
+            cp next.config.ts next.config.ts.backup
+            
+            # Convert TypeScript to JavaScript
+            # Remove type annotations and convert to JS format
+            JS_CONTENT=$(echo "$CONFIG_CONTENT" | sed 's/: [A-Za-z<>|&]\+//g' | sed 's/import type.*//g')
+            
+            # Write the new next.config.js file
+            echo "$JS_CONTENT" > next.config.js
+            
+            echo "✅ Created next.config.js"
+          else
+            echo "✅ No TypeScript config found, using existing next.config.js"
+          fi
+
       - name: 🏗️ Build Application
         run: |
           npm run build
@@ -65,19 +88,19 @@ jobs:
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
             # Include app directory for App Router
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.js 2>/dev/null || \
             tar -czf deployment.tar.gz .next app public package.json package-lock.json
           elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
             # Include pages directory for Pages Router
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.js 2>/dev/null || \
             tar -czf deployment.tar.gz .next pages public package.json package-lock.json
           else
             echo "📂 Basic Next.js setup detected"
             ROUTER_TYPE="basic"
             # Just include .next and public for basic setup
-            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.js 2>/dev/null || \
             tar -czf deployment.tar.gz .next public package.json package-lock.json
           fi
           
@@ -185,6 +208,26 @@ jobs:
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
             
+            # Check for next.config.ts and convert if needed
+            if [ -f "next.config.ts" ]; then
+              echo "📝 Converting next.config.ts to next.config.js..."
+              
+              # Read the content of next.config.ts
+              CONFIG_CONTENT=$(cat next.config.ts)
+              
+              # Convert TypeScript to JavaScript
+              # Remove type annotations and convert to JS format
+              JS_CONTENT=$(echo "$CONFIG_CONTENT" | sed 's/: [A-Za-z<>|&]\+//g' | sed 's/import type.*//g')
+              
+              # Write the new next.config.js file
+              echo "$JS_CONTENT" > next.config.js
+              
+              # Remove the TypeScript config
+              rm next.config.ts
+              
+              echo "✅ Created next.config.js"
+            fi
+            
             # Check current Nginx upstream port
             CURRENT_PORT=""
             if [ -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
@@ -254,10 +297,6 @@ jobs:
               exit 1
             fi
             
-            # Verify static files
-            echo "🔍 Checking for static files..."
-            find .next -type f -name "*.js" | head -5
-            
             # Save package hash
             echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
             
@@ -265,12 +304,15 @@ jobs:
             echo "PORT=$NEW_PORT" >> .env
             echo "NODE_ENV=production" >> .env
             
-            # Create PM2 ecosystem for new process
+            # Create logs directory
+            mkdir -p "$DEPLOY_PATH/logs"
+            
+            # Create PM2 ecosystem for new process with absolute paths
             cat > ecosystem.config.js << EOF
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
-              script: 'node_modules/.bin/next',
+              script: '$STAGING_PATH/node_modules/.bin/next',
               args: 'start',
               cwd: '$STAGING_PATH',
               instances: 1,
@@ -370,14 +412,58 @@ jobs:
                     rm -rf "$BACKUP_PATH"
                     mv "$CURRENT_PATH" "$BACKUP_PATH"
                   fi
-                  mv "$STAGING_PATH" "$CURRENT_PATH"
+                  
+                  # Copy staging to current instead of moving to preserve PM2 working directory
+                  cp -r "$STAGING_PATH" "$CURRENT_PATH"
+                  rm -rf "$STAGING_PATH"
                   mkdir -p "$STAGING_PATH"
+                  
+                  # Update PM2 process to use current path
+                  cd "$CURRENT_PATH"
+                  
+                  # Create new ecosystem config with current path
+                  cat > ecosystem.config.js << EOF
+          module.exports = {
+            apps: [{
+              name: '$NEW_PROCESS',
+              script: '$CURRENT_PATH/node_modules/.bin/next',
+              args: 'start',
+              cwd: '$CURRENT_PATH',
+              instances: 1,
+              exec_mode: 'cluster',
+              env: {
+                NODE_ENV: 'production',
+                PORT: '$NEW_PORT',
+                PWD: '$CURRENT_PATH',
+                NEXT_TELEMETRY_DISABLED: '1'
+              },
+              max_memory_restart: '512M',
+              min_uptime: '10s',
+              max_restarts: 3,
+              autorestart: true,
+              watch: false,
+              kill_timeout: 8000,
+              wait_ready: true,
+              listen_timeout: 15000,
+              error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
+              out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
+              log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
+              time: true,
+              merge_logs: true,
+              source_map_support: true
+            }]
+          };
+          EOF
+                  
+                  # Restart PM2 process with new config
+                  pm2 restart $NEW_PROCESS
                   
                   # Save PM2 configuration
                   pm2 save
                   
                   echo "🎉 Zero-downtime deployment completed successfully!"
                   echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
+                  echo "📂 Working directory: $CURRENT_PATH"
                   
                 else
                   echo "❌ External health check failed after Nginx switch"
