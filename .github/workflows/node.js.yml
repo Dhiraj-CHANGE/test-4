@@ -210,25 +210,44 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Check if we need to install dependencies
-            PACKAGE_HASH="${{ env.PACKAGE_HASH }}"
-            CURRENT_HASH=""
+            # Fix package.json for production dependencies only
+            echo "📦 Creating production package.json..."
+            cat > package.json << 'EOF'
+          {
+            "name": "test-4",
+            "version": "0.1.0",
+            "scripts": {
+              "start": "next start"
+            },
+            "dependencies": {
+              "next": "15.3.2",
+              "react": "^19.0.0",
+              "react-dom": "^19.0.0"
+            }
+          }
+          EOF
             
-            if [ -f "$CURRENT_PATH/package-hash.txt" ]; then
-              CURRENT_HASH=$(cat "$CURRENT_PATH/package-hash.txt")
+            # Install production dependencies
+            echo "📦 Installing production dependencies..."
+            rm -rf node_modules package-lock.json 2>/dev/null || true
+            npm install --omit=dev --prefer-offline --no-audit --progress=false
+            
+            # Verify Next.js installation
+            if [ ! -f "node_modules/.bin/next" ]; then
+              echo "❌ Next.js binary not found after installation"
+              exit 1
             fi
             
-            # Install or copy dependencies
-            if [ "$CURRENT_HASH" = "$PACKAGE_HASH" ] && [ -d "$CURRENT_PATH/node_modules" ]; then
-              echo "📦 Package unchanged, copying node_modules..."
-              cp -r "$CURRENT_PATH/node_modules" "$STAGING_PATH/"
-            else
-              echo "📦 Installing production dependencies..."
-              npm ci --omit=dev --prefer-offline --no-audit --progress=false
+            # Verify critical Next.js modules
+            if [ ! -d "node_modules/next/dist/compiled" ]; then
+              echo "❌ Next.js compiled modules not found"
+              exit 1
             fi
+            
+            echo "✅ Dependencies installed and verified"
             
             # Save package hash
-            echo "$PACKAGE_HASH" > package-hash.txt
+            echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
             
             # Add environment variables
             echo "PORT=$NEW_PORT" >> .env
@@ -294,13 +313,13 @@ jobs:
               echo "🔍 Checking if port is listening..."
               netstat -tuln | grep ":$port " || echo "Port $port is not listening"
               echo "🔍 Checking PM2 logs..."
-              pm2 logs $NEW_PROCESS --lines 5 || true
+              pm2 logs $NEW_PROCESS --lines 10 || true
               return 1
             }
             
             # Wait for new process to be ready
             echo "⏳ Waiting for new process to be ready..."
-            sleep 5
+            sleep 8
             
             if health_check $NEW_PORT; then
               echo "✅ New process is healthy on port $NEW_PORT"
