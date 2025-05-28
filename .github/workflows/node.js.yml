@@ -204,8 +204,7 @@ jobs:
             
             # Install production dependencies (CRITICAL FIX)
             echo "📦 Installing production dependencies..."
-            rm -rf node_modules
-            npm ci --prefer-offline --no-audit --progress=false
+
             
             # Verify Next.js installation
             if [ ! -f "node_modules/.bin/next" ]; then
