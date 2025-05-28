@@ -6,7 +6,7 @@ on:
     branches: [main, dev]
 
 env:
-  NODE_VERSION: '18'
+  NODE_VERSION: '18' # Ensure this matches your server's Node.js version if not managed by nvm/similar
 
 jobs:
   build:
@@ -58,13 +58,16 @@ jobs:
 
       - name: 🏗️ Build Application
         run: |
+          # Ensure next.config.js (or .ts/.mjs) is present before building if your project relies on it
+          # This build step directly uses your repository's Next.js configuration.
           npm run build
           echo "✅ Build completed"
 
       - name: 📦 Create Deployment Package
         run: |
           # Package essential Next.js build artifacts
-          tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.js || true # next.config.js might not exist, allow failure
+          # Add || true to next.config.js to prevent failure if it doesn't exist (e.g., using default Next.js behavior)
+          tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.js || true
 
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
 
@@ -88,7 +91,7 @@ jobs:
 
       - name: ⚙️ Setup Environment Variables
         run: |
-          BRANCH=${GITHUB_REF##*/}
+          BRANCH=${GITHUB_REF##*/} # Extract branch name from GITHUB_REF
           
           if [ "$BRANCH" = "main" ]; then
             echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
@@ -112,9 +115,13 @@ jobs:
       - name: 🔐 Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > ~/.ssh/deploy_key # Assumes one SSH key for both environments
+          # Use PROD_SSH_PRIVATE_KEY for both environments, assuming your self-hosted runner
+          # uses a single key to connect to both dev and prod servers.
+          # If distinct keys are needed, use conditional logic here.
+          echo '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           
+          # Configure SSH for the 'deploy' alias
           cat > ~/.ssh/config << EOF
           Host deploy
             HostName $SERVER
@@ -142,20 +149,21 @@ jobs:
             echo "${{ secrets.DEV_ENV_SECRET }}" | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
           fi
           
-          # Execute zero-downtime deployment with port switching
+          # Execute zero-downtime deployment with port switching on the remote server
           ssh deploy << 'DEPLOY_SCRIPT'
-            set -e
-            
-            # Setup paths
+            set -e # Exit immediately if a command exits with a non-zero status
+
+            # Define paths based on GitHub Actions environment variables
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
             STAGING_PATH="$DEPLOY_PATH/staging"
             CURRENT_PATH="$DEPLOY_PATH/current"
             BACKUP_PATH="$DEPLOY_PATH/backup"
-            
+            PROCESS_NAME="${{ env.PROCESS_NAME }}" # Base process name
+
             echo "📁 Entering staging directory: $STAGING_PATH"
             cd "$STAGING_PATH"
             
-            # Extract new deployment
+            # Extract new deployment package
             echo "📦 Extracting deployment package..."
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
@@ -169,62 +177,59 @@ jobs:
               CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
             fi
             
-            # If no current port found, default to 5005 (or your desired initial port)
+            # If no current port found, default to 5005 (initial port for first deployment)
             if [ -z "$CURRENT_PORT" ]; then
               CURRENT_PORT="5005"
             fi
             
-            # Determine new port (switch between 5005 and 5006)
+            # Determine new port (switch between 5005 and 5006 for blue/green deployment)
             if [ "$CURRENT_PORT" = "5005" ]; then
               NEW_PORT="5006"
-              NEW_PROCESS="${{ env.PROCESS_NAME }}-b"
-              OLD_PROCESS="${{ env.PROCESS_NAME }}-a"
+              NEW_PROCESS="${PROCESS_NAME}-b"
+              OLD_PROCESS="${PROCESS_NAME}-a"
             else
               NEW_PORT="5005"
-              NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
-              OLD_PROCESS="${{ env.PROCESS_NAME }}-b"
+              NEW_PROCESS="${PROCESS_NAME}-a"
+              OLD_PROCESS="${PROCESS_NAME}-b"
             fi
             
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
-            echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
+            echo "🔄 New process name: $NEW_PROCESS, Old process name: $OLD_PROCESS"
             
-            # Install production dependencies
-            # We're relying on the pre-built .next directory from the build step.
-            # Only production dependencies are needed here.
+            # Install production dependencies only
+            # The .next build output already contains the necessary Next.js framework files.
             echo "📦 Installing production dependencies..."
-            rm -rf node_modules # Remove existing node_modules to ensure fresh install
+            rm -rf node_modules # Remove existing node_modules to ensure a fresh install
             npm install --omit=dev --prefer-offline --no-audit --progress=false
             
-            # Verify Next.js installation
+            # Verify Next.js binary presence
             if [ ! -f "node_modules/.bin/next" ]; then
-              echo "❌ Next.js binary not found after installation"
+              echo "❌ Next.js binary not found after installation in $STAGING_PATH/node_modules/.bin"
               exit 1
             fi
             
-            echo "✅ Dependencies installed and verified"
+            echo "✅ Dependencies installed and verified in staging"
             
-            # Add environment variables from .env file that was copied earlier
-            # Ensure PM2 can read them. PM2's env block will take precedence.
-            # Add explicit Next.js telemetry disable here as well.
+            # Add explicit Next.js telemetry disable to the .env file
             echo "NEXT_TELEMETRY_DISABLED=1" >> .env
             
-            # Create logs directory if it doesn't exist
+            # Ensure logs directory exists
             mkdir -p "$DEPLOY_PATH/logs"
             
-            # Create PM2 ecosystem for new process with absolute paths
+            # Create PM2 ecosystem file for the NEW process in the STAGING directory
             cat > ecosystem.config.js << EOF
             module.exports = {
               apps: [{
                 name: '$NEW_PROCESS',
-                script: '$STAGING_PATH/node_modules/.bin/next',
+                script: '$STAGING_PATH/node_modules/.bin/next', # Absolute path to next binary
                 args: 'start',
-                cwd: '$STAGING_PATH',
+                cwd: '$STAGING_PATH', # Current Working Directory for PM2 process
                 instances: 1,
                 exec_mode: 'cluster',
                 env: {
                   NODE_ENV: 'production',
                   PORT: '$NEW_PORT',
-                  PWD: '$STAGING_PATH',
+                  PWD: '$STAGING_PATH', # PWD environment variable
                   NEXT_TELEMETRY_DISABLED: '1'
                 },
                 max_memory_restart: '512M',
@@ -245,11 +250,11 @@ jobs:
             };
             EOF
             
-            # Start new process
-            echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
+            # Start the new process
+            echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT from $STAGING_PATH..."
             pm2 start ecosystem.config.js
             
-            # Health check function
+            # Health check function to wait for the new application to be ready
             health_check() {
               local port=$1
               local attempts=0
@@ -258,86 +263,126 @@ jobs:
               
               echo "🔍 Starting health check on port $port using $HEALTH_CHECK_URL..."
               
+              # Loop with retries for health check
               while [ $attempts -lt $max_attempts ]; do
                 if curl -f -s --max-time 3 "$HEALTH_CHECK_URL" > /dev/null 2>&1; then
                   echo "✅ Health check passed on port $port"
-                  return 0
+                  return 0 # Success
                 fi
                 attempts=$((attempts + 1))
                 echo "🔄 Health check attempt $attempts/$max_attempts on port $port..."
-                sleep 2
+                sleep 2 # Wait before retrying
               done
               
-              echo "❌ Health check failed after $max_attempts attempts"
-              echo "🔍 Checking if port is listening..."
-              netstat -tuln | grep ":$port " || echo "Port $port is not listening"
+              echo "❌ Health check failed after $max_attempts attempts."
+              echo "🔍 Checking if port $port is listening..."
+              netstat -tuln | grep ":$port " || echo "Port $port is not listening."
               echo "🔍 Checking PM2 logs for $NEW_PROCESS..."
-              pm2 logs $NEW_PROCESS --lines 20 || true
-              return 1
+              pm2 logs $NEW_PROCESS --lines 20 || true # Display recent PM2 logs for debugging
+              return 1 # Failure
             }
             
-            # Wait for new process to be ready
-            echo "⏳ Waiting for new process to be ready..."
-            sleep 8 # Give some initial time for the app to start
+            echo "⏳ Giving the new process an initial grace period before health checks..."
+            sleep 8 # Initial wait for the app to start up
             
+            # Perform health check
             if health_check $NEW_PORT; then
               echo "✅ New process is healthy on port $NEW_PORT"
               
-              # Update Nginx upstream to point to new port
+              # Update Nginx upstream configuration to point to the new port
               echo "🔄 Updating Nginx to point to port $NEW_PORT..."
-              
               sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
               upstream test1_backend {
                   server 127.0.0.1:$NEW_PORT;
               }
               EOF
               
-              # Test and reload Nginx
-              if sudo nginx -t; then
-                sudo nginx -s reload
+              # Test and reload Nginx configuration
+              if sudo nginx -t; then # Test Nginx config syntax
+                sudo nginx -s reload # Reload Nginx gracefully
                 echo "✅ Nginx reloaded successfully"
                 
-                # Wait for Nginx to pick up changes and verify external access
-                sleep 3
+                echo "⏳ Waiting for Nginx to fully pick up changes before external verification..."
+                sleep 3 # Give Nginx a moment
                 
+                # Verify external access after Nginx switch
                 if curl -f -s --max-time 5 "https://test1.api.change-networks.com/api/health" > /dev/null 2>&1; then
-                  echo "✅ Traffic successfully switched to new version"
+                  echo "✅ Traffic successfully switched to new version!"
                   
-                  # Stop old process if it exists
+                  # Stop and delete the old process if it exists
                   if pm2 describe $OLD_PROCESS > /dev/null 2>&1; then
                     echo "🛑 Gracefully stopping old process: $OLD_PROCESS"
                     pm2 stop $OLD_PROCESS
-                    sleep 2
+                    sleep 2 # Give it a moment to stop
                     pm2 delete $OLD_PROCESS
+                  else
+                    echo "Old process $OLD_PROCESS not found or already stopped."
                   fi
                   
-                  # Atomically switch current directory to the new deployment
-                  # This ensures that the PM2 process (which uses current_path as CWD)
-                  # points to the new version after the switch.
-                  
-                  # Move existing current to backup
+                  # Atomically move the existing current deployment to backup
                   if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH 2>/dev/null)" ]; then
                     echo "🗑️ Moving existing current deployment to backup: $CURRENT_PATH -> $BACKUP_PATH"
-                    rm -rf "$BACKUP_PATH" # Clear previous backup
+                    rm -rf "$BACKUP_PATH" # Clear any previous backup first
                     mv "$CURRENT_PATH" "$BACKUP_PATH"
                   else
-                    echo "Current deployment directory does not exist or is empty, no backup created."
+                    echo "Current deployment directory ($CURRENT_PATH) does not exist or is empty; no backup needed."
                   fi
 
-                  # Move staging to current
+                  # Move the newly deployed staging directory to current
                   echo "🚀 Moving staging deployment to current: $STAGING_PATH -> $CURRENT_PATH"
                   mv "$STAGING_PATH" "$CURRENT_PATH"
                   
-                  # Ensure staging directory is recreated for next deployment
+                  # Recreate the empty staging directory for the next deployment
                   mkdir -p "$STAGING_PATH"
                   
-                  # PM2 needs to be updated to point to the new 'current' path
-                  # This requires restarting the PM2 process with the correct CWD
-                  echo "🔄 Restarting PM2 process $NEW_PROCESS with updated path..."
-                  cd "$CURRENT_PATH" # Change to the new current directory for PM2 to find ecosystem.config.js
-                  pm2 restart $NEW_PROCESS --update-env # restart and update env (including PWD)
+                  # CRITICAL: Update PM2 process to point to the new 'current' path
+                  # This ensures PM2's internal state accurately reflects the process's actual location.
+                  echo "🔄 Updating PM2 process $NEW_PROCESS to use current path: $CURRENT_PATH"
                   
-                  # Save PM2 configuration to persist changes across reboots
+                  # Change into the new current directory to generate ecosystem.config.js
+                  # This ensures the `cwd` in the PM2 config will point to the new `CURRENT_PATH`
+                  cd "$CURRENT_PATH" 
+                  
+                  # Re-create the ecosystem.config.js file in the CURRENT_PATH
+                  # This is crucial for PM2 to correctly update its internal process state.
+                  cat > ecosystem.config.js << EOF
+                  module.exports = {
+                    apps: [{
+                      name: '$NEW_PROCESS',
+                      script: '$CURRENT_PATH/node_modules/.bin/next',
+                      args: 'start',
+                      cwd: '$CURRENT_PATH', # Explicitly set CWD to the final path
+                      instances: 1,
+                      exec_mode: 'cluster',
+                      env: {
+                        NODE_ENV: 'production',
+                        PORT: '$NEW_PORT',
+                        PWD: '$CURRENT_PATH', # Update PWD environment variable
+                        NEXT_TELEMETRY_DISABLED: '1'
+                      },
+                      max_memory_restart: '512M',
+                      min_uptime: '10s',
+                      max_restarts: 3,
+                      autorestart: true,
+                      watch: false,
+                      kill_timeout: 8000,
+                      wait_ready: true,
+                      listen_timeout: 15000,
+                      error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
+                      out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
+                      log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
+                      time: true,
+                      merge_logs: true,
+                      source_map_support: true
+                    }]
+                  };
+                  EOF
+                  
+                  # Restart the process using the newly generated config in the correct CWD
+                  # This updates PM2's internal records for the process's working directory.
+                  pm2 restart ecosystem.config.js --update-env # --update-env ensures new env vars are applied
+                  
+                  # Save PM2 configuration to persist changes across server reboots
                   pm2 save
                   
                   echo "🎉 Zero-downtime deployment completed successfully!"
@@ -345,9 +390,9 @@ jobs:
                   echo "📂 Working directory: $CURRENT_PATH"
                   
                 else
-                  echo "❌ External health check failed after Nginx switch. Rolling back."
+                  echo "❌ External health check failed after Nginx switch. Rolling back Nginx."
                   
-                  # Rollback Nginx config
+                  # Rollback Nginx config to the old port if traffic switch verification fails
                   if [ -n "$CURRENT_PORT" ]; then
                     echo "🔄 Rolling back Nginx to port $CURRENT_PORT..."
                     sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
@@ -356,28 +401,28 @@ jobs:
                     }
                     EOF
                     sudo nginx -s reload
-                    echo "✅ Nginx rolled back successfully"
+                    echo "✅ Nginx rolled back successfully."
                   fi
                   
-                  # Stop failed new process
+                  # Stop and delete the newly deployed (and failing) process
                   echo "🛑 Stopping failed new process: $NEW_PROCESS"
-                  pm2 stop $NEW_PROCESS || true
+                  pm2 stop $NEW_PROCESS || true # Use || true to prevent script failure if process isn't running
                   pm2 delete $NEW_PROCESS || true
                   
-                  exit 1
+                  exit 1 # Indicate failure
                 fi
               else
-                echo "❌ Nginx configuration test failed. Not reloading Nginx."
+                echo "❌ Nginx configuration test failed. Not reloading Nginx. Stopping new process."
                 pm2 stop $NEW_PROCESS || true
                 pm2 delete $NEW_PROCESS || true
-                exit 1
+                exit 1 # Indicate failure
               fi
               
             else
-              echo "❌ New process failed health check. Not switching traffic."
+              echo "❌ New process failed initial health check. Not switching traffic. Stopping new process."
               pm2 stop $NEW_PROCESS || true
               pm2 delete $NEW_PROCESS || true
-              exit 1
+              exit 1 # Indicate failure
             fi
           DEPLOY_SCRIPT
 
@@ -385,35 +430,36 @@ jobs:
         run: |
           ssh deploy << 'VERIFY_SCRIPT'
             echo "📊 PM2 Status:"
-            pm2 status
+            pm2 status || echo "PM2 is not running or status command failed."
             
             echo ""
-            echo "🌐 External Health Check:"
+            echo "🌐 External Health Check (via Nginx reverse proxy):"
             curl -s https://test1.api.change-networks.com/api/health || echo "External health check failed."
             
             echo ""
             echo "🔧 Nginx Upstream Config:"
-            cat /etc/nginx/conf.d/test1_backend.conf || echo "Nginx config not found."
+            cat /etc/nginx/conf.d/test1_backend.conf || echo "Nginx config file not found."
             
             echo ""
-            echo "📋 Active Processes:"
+            echo "📋 Active Processes Listening on Ports 5005/5006:"
             netstat -tuln | grep -E ':(5005|5006) ' || echo "No processes listening on 5005 or 5006."
             
             echo ""
-            echo "🔗 Current Deployment Directory:"
-            ls -la ${{ env.DEPLOY_PATH }}/current || echo "Current deployment directory not found."
+            echo "🔗 Current Deployment Directory Contents:"
+            ls -la ${{ env.DEPLOY_PATH }}/current || echo "Current deployment directory not found or empty."
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
         if: always()
         run: |
+          # Clean up local artifacts and SSH key
           rm -f ~/.ssh/deploy_key deployment.tar.gz
           echo "✅ Local cleanup completed"
 
   notify:
     needs: [build, deploy]
     runs-on: self-hosted
-    if: always()
+    if: always() # This job will always run, regardless of previous job success/failure
     steps:
       - name: 📢 Deployment Status
         run: |
@@ -425,5 +471,5 @@ jobs:
           else
             echo "❌ Test1 API deployment failed!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
-            echo "🔍 Check the logs above for details"
+            echo "🔍 Check the 'Deploy' job logs above for details on the failure."
           fi
