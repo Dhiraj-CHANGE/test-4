@@ -64,19 +64,28 @@ jobs:
           if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
+            # Include app directory for App Router
             tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
             tar -czf deployment.tar.gz .next app public package.json package-lock.json
-          else
+          elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
+            # Include pages directory for Pages Router
             tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.* 2>/dev/null || \
             tar -czf deployment.tar.gz .next pages public package.json package-lock.json
+          else
+            echo "📂 Basic Next.js setup detected"
+            ROUTER_TYPE="basic"
+            # Just include .next and public for basic setup
+            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next public package.json package-lock.json
           fi
           
           # Create router type file for deployment script
           echo $ROUTER_TYPE > router-type.txt
           
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
+          echo "📂 Router type: $ROUTER_TYPE"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
@@ -142,10 +151,13 @@ jobs:
 
       - name: 🚀 Zero-Downtime Deploy with Port Switching
         run: |
-          # Upload deployment package
+          # Create staging directory on server first
+          ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/staging"
+          
+          # Upload deployment package with correct filenames
           echo "📤 Uploading deployment package..."
-          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/
-          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/
+          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/deployment.tar.gz
+          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/router-type.txt
           
           # Copy environment variables
           echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
@@ -177,6 +189,11 @@ jobs:
             CURRENT_PORT=""
             if [ -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
               CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
+            fi
+            
+            # If no current port found, default to 5005
+            if [ -z "$CURRENT_PORT" ]; then
+              CURRENT_PORT="5005"
             fi
             
             # Determine new port (switch between 5005 and 5006)
@@ -255,23 +272,16 @@ jobs:
             echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.js
             
-            # Health check function based on router type
+            # Health check function
             health_check() {
               local port=$1
               local attempts=0
               local max_attempts=30
-              local health_endpoint=""
               
-              if [ "$ROUTER_TYPE" = "app" ]; then
-                health_endpoint="/api/health"
-              else
-                health_endpoint="/api/health"
-              fi
-              
-              echo "🔍 Starting health check on port $port using $health_endpoint..."
+              echo "🔍 Starting health check on port $port using /api/health..."
               
               while [ $attempts -lt $max_attempts ]; do
-                if curl -f -s --max-time 3 "http://localhost:$port$health_endpoint" > /dev/null 2>&1; then
+                if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
                   echo "✅ Health check passed on port $port"
                   return 0
                 fi
@@ -281,6 +291,10 @@ jobs:
               done
               
               echo "❌ Health check failed after $max_attempts attempts"
+              echo "🔍 Checking if port is listening..."
+              netstat -tuln | grep ":$port " || echo "Port $port is not listening"
+              echo "🔍 Checking PM2 logs..."
+              pm2 logs $NEW_PROCESS --lines 5 || true
               return 1
             }
             
@@ -321,7 +335,7 @@ jobs:
                   fi
                   
                   # Backup current and move staging to current
-                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH)" ]; then
+                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH 2>/dev/null)" ]; then
                     rm -rf "$BACKUP_PATH"
                     mv "$CURRENT_PATH" "$BACKUP_PATH"
                   fi
@@ -397,3 +411,21 @@ jobs:
         run: |
           rm -f ~/.ssh/deploy_key deployment.tar.gz router-type.txt
           echo "✅ Cleanup completed"
+
+  notify:
+    needs: [build, deploy]
+    runs-on: self-hosted
+    if: always()
+    steps:
+      - name: 📢 Deployment Status
+        run: |
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "🎉 Test1 API deployment successful!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+            echo "🔗 URL: https://test1.api.change-networks.com"
+          else
+            echo "❌ Test1 API deployment failed!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🔍 Check the logs above for details"
+          fi
