@@ -61,6 +61,7 @@ jobs:
           [ -d "lib" ] && cp -r lib dist/ || echo "No lib directory"
           [ -d "utils" ] && cp -r utils dist/ || echo "No utils directory"
           [ -d "hooks" ] && cp -r hooks dist/ || echo "No hooks directory"
+          [ -d "scripts" ] && cp -r scripts dist/ || echo "No scripts directory"
           
           # Copy package files
           cp package.json package-lock.json dist/
@@ -75,10 +76,7 @@ jobs:
             const minimal = {
               name: pkg.name,
               version: pkg.version,
-              scripts: { 
-                start: 'next start',
-                build: 'next build'
-              },
+              scripts: pkg.scripts, // Keep original scripts
               dependencies: pkg.dependencies
             };
             require('fs').writeFileSync('dist/package.json', JSON.stringify(minimal, null, 2));
@@ -229,14 +227,14 @@ jobs:
             exit 1
           fi
 
-      - name: 🚀 Lightning Deploy
+      - name: 🚀 Zero-Downtime Deploy
         run: |
           # Create deployment package
           cd dist
           tar -czf ../app.tar.gz .
           cd ..
           
-          # Deploy with optimized script
+          # Deploy with zero-downtime script
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
@@ -363,29 +361,80 @@ jobs:
               echo "💾 Backup: $BACKUP_PATH"
             fi
             
-            # Stop existing process if running
-            if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
-              echo "🛑 Stopping existing process..."
-              pm2 stop ${{ env.PROCESS_NAME }}
-              sleep 2
-            fi
+            # Start new process BEFORE stopping the old one (zero downtime)
+            echo "🚀 Starting new application version..."
+            cd "$RELEASE_PATH"
             
-            # Atomic switch
-            echo "🔄 Switching to new release..."
-            ln -snf "$RELEASE_PATH" "$CURRENT_PATH"
+            # Use a temporary process name for the new version
+            TMP_PROCESS_NAME="${{ env.PROCESS_NAME }}-new"
             
-            # Start PM2 process
-            cd "$CURRENT_PATH"
-            echo "🚀 Starting PM2 process..."
-            pm2 start ecosystem.config.js
+            # Create temporary ecosystem file
+            cat > "$RELEASE_PATH/tmp-ecosystem.config.js" << EOF
+          module.exports = {
+            apps: [{
+              name: '$TMP_PROCESS_NAME',
+              script: '$APP_PATH/node_modules/.bin/next',
+              args: 'start',
+              cwd: '$APP_PATH',
+              instances: 1,
+              exec_mode: 'cluster',
+              env: {
+                NODE_ENV: 'production',
+                PORT: '${{ env.PORT_APP }}',
+                PWD: '$APP_PATH',
+                NEXT_TELEMETRY_DISABLED: '1'
+              },
+              max_memory_restart: '512M',
+              min_uptime: '15s',
+              max_restarts: 5,
+              autorestart: true,
+              watch: false,
+              kill_timeout: 5000,
+              wait_ready: true,
+              listen_timeout: 20000,
+              error_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME-error.log',
+              out_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME-out.log',
+              log_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME.log',
+              time: true,
+              merge_logs: true,
+              source_map_support: true
+            }]
+          };
+          EOF
+            
+            # Start the new process
+            pm2 start tmp-ecosystem.config.js
             
             # Wait for process to initialize
-            echo "⏳ Waiting for application to start..."
+            echo "⏳ Waiting for new application to start..."
             sleep 5
             
+            # Check if new application is healthy
             if health_check; then
-              echo "🎉 Deployment successful!"
+              echo "✅ New application is healthy"
+              
+              # Switch the symlink
+              echo "🔄 Switching to new release..."
+              ln -snf "$RELEASE_PATH" "$CURRENT_PATH"
+              
+              # Stop the old process if it exists
+              if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
+                echo "🛑 Stopping old process..."
+                pm2 stop ${{ env.PROCESS_NAME }}
+                pm2 delete ${{ env.PROCESS_NAME }}
+              fi
+              
+              # Rename the new process to the standard name
+              echo "🔄 Renaming process..."
+              pm2 stop $TMP_PROCESS_NAME
+              pm2 delete $TMP_PROCESS_NAME
+              
+              # Start with the correct name
+              cd "$CURRENT_PATH"
+              pm2 start ecosystem.config.js
               pm2 save
+              
+              echo "🎉 Zero-downtime deployment successful!"
               
               # Cleanup old releases (keep 3)
               echo "🧹 Cleaning up old releases..."
@@ -396,22 +445,13 @@ jobs:
               pm2 status ${{ env.PROCESS_NAME }}
               
             else
-              echo "❌ Deployment failed, attempting rollback..."
+              echo "❌ New application failed health check, aborting deployment"
               
-              # Stop failed process
-              pm2 stop ${{ env.PROCESS_NAME }} || true
-              pm2 delete ${{ env.PROCESS_NAME }} || true
+              # Clean up the failed deployment
+              pm2 stop $TMP_PROCESS_NAME || true
+              pm2 delete $TMP_PROCESS_NAME || true
               
-              if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
-                echo "🔄 Rolling back to: $BACKUP_PATH"
-                ln -snf "$BACKUP_PATH" "$CURRENT_PATH"
-                cd "$CURRENT_PATH"
-                pm2 start ecosystem.config.js
-                echo "✅ Rollback completed"
-              else
-                echo "⚠️ No backup available"
-              fi
-              
+              echo "⚠️ Keeping current version active"
               exit 1
             fi
           DEPLOY_SCRIPT
@@ -439,6 +479,11 @@ jobs:
             echo ""
             echo "💾 Disk Usage:"
             du -sh ${{ env.DEPLOY_PATH }}/releases/* 2>/dev/null | tail -3 || echo "No releases found"
+            
+            echo ""
+            echo "🔗 Symlink Check:"
+            ls -la ${{ env.DEPLOY_PATH }}/current
+            readlink -f ${{ env.DEPLOY_PATH }}/current
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
