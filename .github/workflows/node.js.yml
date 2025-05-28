@@ -64,15 +64,15 @@ jobs:
           if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next app node_modules public package.json package-lock.json next.config.*
           elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next pages node_modules public package.json package-lock.json next.config.*
           else
             echo "📂 Basic Next.js setup detected"
             ROUTER_TYPE="basic"
-            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next public node_modules package.json package-lock.json next.config.*
           fi
           
           echo $ROUTER_TYPE > router-type.txt
@@ -205,7 +205,7 @@ jobs:
             # Install production dependencies (CRITICAL FIX)
             echo "📦 Installing production dependencies..."
             rm -rf node_modules
-            npm ci --production --prefer-offline --no-audit --progress=false
+            npm ci --prefer-offline --no-audit --progress=false
             
             # Verify Next.js installation
             if [ ! -f "node_modules/.bin/next" ]; then
