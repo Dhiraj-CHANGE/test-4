@@ -219,7 +219,7 @@ jobs:
           NODE_ENV=production
           ENV_EOF
             
-            # Create optimized PM2 ecosystem for Pages Router
+            # Create optimized PM2 ecosystem with absolute paths
             cat > "$RELEASE_PATH/ecosystem.config.js" << EOF
           module.exports = {
             apps: [{
@@ -232,47 +232,42 @@ jobs:
               env: {
                 NODE_ENV: 'production',
                 PORT: '${{ env.PORT_APP }}',
-                PWD: '$APP_PATH',
-                NEXT_TELEMETRY_DISABLED: '1'
+                PWD: '$APP_PATH'
               },
               max_memory_restart: '512M',
-              min_uptime: '15s',
+              min_uptime: '10s',
               max_restarts: 5,
               autorestart: true,
               watch: false,
               kill_timeout: 5000,
               wait_ready: true,
-              listen_timeout: 20000,
+              listen_timeout: 10000,
               error_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-error.log',
               out_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-out.log',
               log_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}.log',
               time: true,
-              merge_logs: true,
-              source_map_support: true
+              merge_logs: true
             }]
           };
           EOF
             
-            # Enhanced health check for Pages Router
+            # Enhanced health check function
             health_check() {
               local attempts=0
-              local max_attempts=40
+              local max_attempts=30
               local port=${{ env.PORT_APP }}
               
-              echo "🔍 Starting health check for Pages Router on port $port..."
+              echo "🔍 Starting health check on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
                 # Check if port is listening
                 if netstat -tuln | grep ":$port " > /dev/null 2>&1; then
-                  # Check if Pages Router API responds
-                  if curl -f -s --max-time 5 "http://localhost:$port/api/health" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (Pages Router API responding)"
-                    return 0
-                  elif curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (Pages Router home page responding)"
+                  # Check if application responds
+                  if curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (port listening and responding)"
                     return 0
                   else
-                    echo "⚠️ Port listening but Pages Router not responding yet..."
+                    echo "⚠️ Port listening but app not responding yet..."
                   fi
                 else
                   echo "⏳ Port $port not ready yet..."
