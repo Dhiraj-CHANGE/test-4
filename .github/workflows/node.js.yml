@@ -131,37 +131,54 @@ jobs:
         id: env
         run: |
           BRANCH=${GITHUB_REF##*/}
+          DEPLOYMENT_ID="${{ needs.build.outputs.deployment-id }}"
+          
+          # Create temporary files for secure handling
+          TEMP_DIR=$(mktemp -d)
           
           if [ "$BRANCH" = "main" ]; then
-            cat >> $GITHUB_ENV << EOF
-          DEPLOY_PATH=/var/www/test-4
-          SERVER=${{ secrets.PROD_SERVER_HOST }}
-          USER=${{ secrets.PROD_SERVER_USER }}
-          PORT_SSH=${{ secrets.PROD_SSH_PORT }}
-          PORT_APP=5005
-          PROCESS_NAME=test-4-prod
-          ENV_VARS=${{ secrets.PROD_ENV_SECRET }}
-          SSH_KEY=${{ secrets.PROD_SSH_PRIVATE_KEY }}
-          EOF
+            # Production environment
+            echo "DEPLOY_PATH=/var/www/test-4" >> $GITHUB_ENV
+            echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
+            echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
+            echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
+            echo "PORT_APP=5005" >> $GITHUB_ENV
+            echo "PROCESS_NAME=test-4-prod" >> $GITHUB_ENV
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+            
+            # Handle multiline secrets safely
+            printf '%s' '${{ secrets.PROD_ENV_SECRET }}' > "$TEMP_DIR/env_vars"
+            printf '%s' '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > "$TEMP_DIR/ssh_key"
+            
           else
-            cat >> $GITHUB_ENV << EOF
-          DEPLOY_PATH=/var/www/test-4-dev
-          SERVER=${{ secrets.DEV_SERVER_HOST }}
-          USER=${{ secrets.DEV_SERVER_USER }}
-          PORT_SSH=${{ secrets.DEV_SSH_PORT }}
-          PORT_APP=5001
-          PROCESS_NAME=test-4-dev
-          ENV_VARS=${{ secrets.DEV_ENV_SECRET }}
-          SSH_KEY=${{ secrets.DEV_SSH_PRIVATE_KEY }}
-          EOF
+            # Development environment
+            echo "DEPLOY_PATH=/var/www/test-4-dev" >> $GITHUB_ENV
+            echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
+            echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
+            echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
+            echo "PORT_APP=5001" >> $GITHUB_ENV
+            echo "PROCESS_NAME=test-4-dev" >> $GITHUB_ENV
+            echo "ENVIRONMENT=development" >> $GITHUB_ENV
+            
+            # Handle multiline secrets safely
+            printf '%s' '${{ secrets.DEV_ENV_SECRET }}' > "$TEMP_DIR/env_vars"
+            printf '%s' '${{ secrets.DEV_SSH_PRIVATE_KEY }}' > "$TEMP_DIR/ssh_key"
           fi
           
-          echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
+          echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
+          
+          # Set secure permissions
+          chmod 600 "$TEMP_DIR/env_vars" "$TEMP_DIR/ssh_key"
+          
+          echo "✅ Environment configured for $BRANCH"
 
       - name: 🔐 Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          
+          # Copy SSH key from temp file
+          cp "$TEMP_DIR/ssh_key" ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           
           cat > ~/.ssh/config << EOF
@@ -174,6 +191,8 @@ jobs:
             ServerAliveInterval 30
             ConnectTimeout 10
           EOF
+          
+          echo "✅ SSH configuration created"
 
       - name: 🚀 Lightning Deploy
         run: |
@@ -211,15 +230,26 @@ jobs:
             
             echo "📦 Extracting package..."
             tar -xzf app.tar.gz && rm app.tar.gz
+          DEPLOY_SCRIPT
+          
+          # Upload environment file separately
+          echo "📤 Uploading environment configuration..."
+          scp "$TEMP_DIR/env_vars" deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/dist/.env.production
+          
+          # Continue with the rest of deployment
+          ssh deploy << 'DEPLOY_SCRIPT'
+            set -e
             
-            # Create environment file
-            cat > "$APP_PATH/.env.production" << 'ENV_EOF'
-          ${{ env.ENV_VARS }}
-          PORT=${{ env.PORT_APP }}
-          NODE_ENV=production
-          ENV_EOF
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
+            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
+            CURRENT_PATH="$DEPLOY_PATH/current"
+            APP_PATH="$RELEASE_PATH/dist"
             
-            # Create optimized PM2 ecosystem with absolute paths
+            # Add PORT to environment file
+            echo "PORT=${{ env.PORT_APP }}" >> "$APP_PATH/.env.production"
+            echo "NODE_ENV=production" >> "$APP_PATH/.env.production"
+            
+            # Create optimized PM2 ecosystem for Pages Router
             cat > "$RELEASE_PATH/ecosystem.config.js" << EOF
           module.exports = {
             apps: [{
@@ -232,42 +262,47 @@ jobs:
               env: {
                 NODE_ENV: 'production',
                 PORT: '${{ env.PORT_APP }}',
-                PWD: '$APP_PATH'
+                PWD: '$APP_PATH',
+                NEXT_TELEMETRY_DISABLED: '1'
               },
               max_memory_restart: '512M',
-              min_uptime: '10s',
+              min_uptime: '15s',
               max_restarts: 5,
               autorestart: true,
               watch: false,
               kill_timeout: 5000,
               wait_ready: true,
-              listen_timeout: 10000,
+              listen_timeout: 20000,
               error_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-error.log',
               out_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-out.log',
               log_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}.log',
               time: true,
-              merge_logs: true
+              merge_logs: true,
+              source_map_support: true
             }]
           };
           EOF
             
-            # Enhanced health check function
+            # Enhanced health check for Pages Router
             health_check() {
               local attempts=0
-              local max_attempts=30
+              local max_attempts=40
               local port=${{ env.PORT_APP }}
               
-              echo "🔍 Starting health check on port $port..."
+              echo "🔍 Starting health check for Pages Router on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
                 # Check if port is listening
                 if netstat -tuln | grep ":$port " > /dev/null 2>&1; then
-                  # Check if application responds
-                  if curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (port listening and responding)"
+                  # Check if Pages Router API responds
+                  if curl -f -s --max-time 5 "http://localhost:$port/api/health" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (Pages Router API responding)"
+                    return 0
+                  elif curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (Pages Router home page responding)"
                     return 0
                   else
-                    echo "⚠️ Port listening but app not responding yet..."
+                    echo "⚠️ Port listening but Pages Router not responding yet..."
                   fi
                 else
                   echo "⏳ Port $port not ready yet..."
@@ -372,7 +407,12 @@ jobs:
       - name: 🧹 Cleanup
         if: always()
         run: |
-          rm -f ~/.ssh/deploy_key app.tar.gz 2>/dev/null || true
+          rm -f ~/.ssh/deploy_key 2>/dev/null || true
+          rm -f app.tar.gz 2>/dev/null || true
+          if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+            rm -rf "$TEMP_DIR"
+          fi
+          echo "✅ Cleanup completed"
 
   notify:
     needs: [build, deploy]
