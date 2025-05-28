@@ -176,22 +176,58 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           
-          # Copy SSH key from temp file
-          cp "$TEMP_DIR/ssh_key" ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          # Clean and validate SSH key
+          echo "🔧 Setting up SSH key..."
           
+          # Write SSH key with proper formatting
+          cat > ~/.ssh/deploy_key << 'SSH_KEY_EOF'
+          ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          SSH_KEY_EOF
+          
+          # Ensure proper line endings and format
+          sed -i 's/\r$//' ~/.ssh/deploy_key
+          
+          # Set strict permissions
+          chmod 600 ~/.ssh/deploy_key
+          chmod 700 ~/.ssh
+          
+          # Validate SSH key format
+          if ! ssh-keygen -l -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "❌ Invalid SSH key format"
+            echo "🔍 SSH key content (first/last lines):"
+            head -1 ~/.ssh/deploy_key
+            tail -1 ~/.ssh/deploy_key
+            exit 1
+          fi
+          
+          # Create SSH config with better settings
           cat > ~/.ssh/config << EOF
           Host deploy
             HostName $SERVER
             User $USER
             Port $PORT_SSH
             IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
             StrictHostKeyChecking no
             ServerAliveInterval 30
             ConnectTimeout 10
+            PreferredAuthentications publickey
+            PubkeyAuthentication yes
+            PasswordAuthentication no
           EOF
           
-          echo "✅ SSH configuration created"
+          chmod 600 ~/.ssh/config
+          
+          # Test SSH connection
+          echo "🔍 Testing SSH connection..."
+          if ssh -o ConnectTimeout=10 deploy "echo 'SSH connection successful'"; then
+            echo "✅ SSH connection verified"
+          else
+            echo "❌ SSH connection failed"
+            echo "🔍 Debugging SSH connection..."
+            ssh -vvv -o ConnectTimeout=10 deploy "echo 'test'" 2>&1 | head -20
+            exit 1
+          fi
 
       - name: 🚀 Lightning Deploy
         run: |
