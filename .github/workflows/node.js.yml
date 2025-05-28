@@ -263,7 +263,7 @@ jobs:
             
             # Start new process
             echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
-            pm2 start ecosystem.config.js
+            pm2 start ecosystem.config.cjs
             
             # Health check function
             health_check() {
