@@ -1,4 +1,4 @@
-name: ⚡ Lightning Deploy
+name: ⚡ Test1 API Zero Downtime Deploy
 
 on:
   push:
@@ -27,79 +27,50 @@ jobs:
       - name: 📊 Generate Package Hash
         id: hash
         run: |
-          PACKAGE_HASH=$(sha256sum package.json | cut -d ' ' -f 1)
+          PACKAGE_HASH=$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)
           echo "package-hash=$PACKAGE_HASH" >> $GITHUB_OUTPUT
           echo "📦 Package Hash: $PACKAGE_HASH"
+
+      - name: ♻️ Cache Node Modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
 
       - name: ⚡ Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
 
       - name: 🔧 Install Dependencies
         run: |
-          npm ci --prefer-offline --no-audit --progress=false
-          echo "✅ Dependencies installed"
+          if [ ! -d "node_modules" ] || [ "$(find node_modules -maxdepth 0 -empty 2>/dev/null)" ]; then
+            echo "📦 Installing dependencies..."
+            npm ci --prefer-offline --no-audit --progress=false
+          else
+            echo "📦 Using cached dependencies"
+          fi
 
       - name: 🏗️ Build Application
         run: |
           npm run build
           echo "✅ Build completed"
 
-      - name: 📦 Create Optimized Package
+      - name: 📦 Create Deployment Package
         run: |
-          # Create minimal production package
-          mkdir -p dist
-          
-          # Verify .next directory exists
-          if [ ! -d ".next" ]; then
-            echo "❌ .next directory not found. Build may have failed."
-            exit 1
-          fi
-          
-          # Copy Next.js build output for Pages Router
-          cp -r .next dist/
-          
-          # Copy essential directories (only if they exist)
-          [ -d "pages" ] && cp -r pages dist/ || echo "No pages directory found"
-          [ -d "public" ] && cp -r public dist/ || echo "No public directory found"
-          [ -d "styles" ] && cp -r styles dist/ || echo "No styles directory"
-          [ -d "components" ] && cp -r components dist/ || echo "No components directory"
-          [ -d "lib" ] && cp -r lib dist/ || echo "No lib directory"
-          [ -d "utils" ] && cp -r utils dist/ || echo "No utils directory"
-          [ -d "hooks" ] && cp -r hooks dist/ || echo "No hooks directory"
-          [ -d "scripts" ] && cp -r scripts dist/ || echo "No scripts directory"
-          [ -d "app" ] && cp -r app dist/ || echo "No app directory"
-          
-          # Copy package files
-          cp package.json package-lock.json dist/
-          
-          # Copy Next.js config if it exists
-          [ -f "next.config.js" ] && cp next.config.js dist/ || echo "No next.config.js"
-          [ -f "next.config.mjs" ] && cp next.config.mjs dist/ || echo "No next.config.mjs"
-          
-          # Create deployment info file
-          cat > dist/deployment-info.json << EOF
-          {
-            "id": "${{ steps.meta.outputs.deployment-id }}",
-            "branch": "${GITHUB_REF##*/}",
-            "commit": "${GITHUB_SHA}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "size": "$(du -sh dist | cut -f1)",
-            "router": "pages",
-            "package_hash": "${{ steps.hash.outputs.package-hash }}"
-          }
-          EOF
-          echo "📦 Package size: $(du -sh dist | cut -f1)"
+          # Create deployment tarball with only necessary files
+          tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
+          tar -czf deployment.tar.gz .next app public package.json package-lock.json
+          echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ steps.meta.outputs.deployment-id }}
-          path: dist
+          path: deployment.tar.gz
           retention-days: 1
-          compression-level: 9
 
   deploy:
     needs: build
@@ -110,190 +81,148 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-${{ needs.build.outputs.deployment-id }}
-          path: dist
+          path: .
 
       - name: ⚙️ Setup Environment
-        id: env
         run: |
           BRANCH=${GITHUB_REF##*/}
-          DEPLOYMENT_ID="${{ needs.build.outputs.deployment-id }}"
-          PACKAGE_HASH="${{ needs.build.outputs.package-hash }}"
-          
-          # Create temporary files for secure handling
-          TEMP_DIR=$(mktemp -d)
           
           if [ "$BRANCH" = "main" ]; then
-            # Production environment
             echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PORT_APP=5005" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME}}" >> $GITHUB_ENV
             echo "ENVIRONMENT=production" >> $GITHUB_ENV
-            
-            # Handle multiline secrets safely
-            printf '%s' '${{ secrets.PROD_ENV_SECRET }}' > "$TEMP_DIR/env_vars"
-            printf '%s' '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > "$TEMP_DIR/ssh_key"
-            
           else
-            # Development environment
             echo "DEPLOY_PATH=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PORT_APP=5001" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME}}" >> $GITHUB_ENV
             echo "ENVIRONMENT=development" >> $GITHUB_ENV
-            
-            # Handle multiline secrets safely
-            printf '%s' '${{ secrets.DEV_ENV_SECRET }}' > "$TEMP_DIR/env_vars"
-            printf '%s' '${{ secrets.DEV_SSH_PRIVATE_KEY }}' > "$TEMP_DIR/ssh_key"
           fi
           
-          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
-          echo "PACKAGE_HASH=$PACKAGE_HASH" >> $GITHUB_ENV
-          echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
-          
-          # Set secure permissions
-          chmod 600 "$TEMP_DIR/env_vars" "$TEMP_DIR/ssh_key"
-          
-          echo "✅ Environment configured for $BRANCH"
+          echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
+          echo "PACKAGE_HASH=${{ needs.build.outputs.package-hash }}" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH
         run: |
           mkdir -p ~/.ssh
-          
-          # Clean and validate SSH key
-          echo "🔧 Setting up SSH key..."
-          
-          # Write SSH key with proper formatting
-          cat > ~/.ssh/deploy_key << 'SSH_KEY_EOF'
-          ${{ secrets.PROD_SSH_PRIVATE_KEY }}
-          SSH_KEY_EOF
-          
-          # Ensure proper line endings and format
-          sed -i 's/\r$//' ~/.ssh/deploy_key
-          
-          # Set strict permissions
+          echo '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          chmod 700 ~/.ssh
           
-          # Create SSH config with better settings
           cat > ~/.ssh/config << EOF
           Host deploy
             HostName $SERVER
             User $USER
             Port $PORT_SSH
             IdentityFile ~/.ssh/deploy_key
-            IdentitiesOnly yes
             StrictHostKeyChecking no
             ServerAliveInterval 30
             ConnectTimeout 10
-            PreferredAuthentications publickey
-            PubkeyAuthentication yes
-            PasswordAuthentication no
           EOF
-          
-          chmod 600 ~/.ssh/config
-          
-          # Test SSH connection
-          echo "🔍 Testing SSH connection..."
-          if ssh -o ConnectTimeout=10 deploy "echo 'SSH connection successful'"; then
-            echo "✅ SSH connection verified"
-          else
-            echo "❌ SSH connection failed"
-            exit 1
-          fi
 
-      - name: 🚀 True Zero-Downtime Deploy
+      - name: 🚀 Zero-Downtime Deploy with Port Switching
         run: |
-          # Create deployment package
-          cd dist
-          tar -czf ../app.tar.gz .
-          cd ..
+          # Upload deployment package
+          echo "📤 Uploading deployment package..."
+          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/
           
-          # Deploy with optimized zero-downtime script
+          # Copy environment variables
+          echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
+          
+          # Execute zero-downtime deployment with port switching
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
             # Setup paths
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
-            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
+            STAGING_PATH="$DEPLOY_PATH/staging"
             CURRENT_PATH="$DEPLOY_PATH/current"
-            SHARED_PATH="$DEPLOY_PATH/shared"
+            BACKUP_PATH="$DEPLOY_PATH/backup"
             
-            # Create directory structure
-            mkdir -p "$RELEASE_PATH" "$SHARED_PATH/logs" "$SHARED_PATH/node_modules"
+            # Create directories
+            mkdir -p "$STAGING_PATH" "$CURRENT_PATH" "$BACKUP_PATH" "$DEPLOY_PATH/logs"
             
-            # Get current package hash if available
-            CURRENT_HASH=""
-            if [ -L "$CURRENT_PATH" ] && [ -f "$CURRENT_PATH/deployment-info.json" ]; then
-              CURRENT_HASH=$(grep -o '"package_hash":"[^"]*"' "$CURRENT_PATH/deployment-info.json" | cut -d'"' -f4)
+            cd "$STAGING_PATH"
+            
+            # Extract new deployment
+            echo "📦 Extracting deployment package..."
+            tar -xzf deployment.tar.gz
+            rm deployment.tar.gz
+            
+            # Check current Nginx upstream port
+            CURRENT_PORT=""
+            if [ -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
+              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
             fi
             
-            # Check if we need to reinstall dependencies
-            SHOULD_INSTALL=true
-            if [ "$CURRENT_HASH" = "${{ env.PACKAGE_HASH }}" ]; then
-              echo "📦 Package.json unchanged, will reuse node_modules"
-              SHOULD_INSTALL=false
+            # Determine new port (switch between 5005 and 5006)
+            if [ "$CURRENT_PORT" = "5005" ]; then
+              NEW_PORT="5006"
+              NEW_PROCESS="${{ env.PROCESS_NAME }}-b"
+              OLD_PROCESS="${{ env.PROCESS_NAME }}-a"
             else
-              echo "📦 Package.json changed, will reinstall dependencies"
+              NEW_PORT="5005"
+              NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
+              OLD_PROCESS="${{ env.PROCESS_NAME }}-b"
             fi
             
-            echo "🏗️ Setting up release directory..."
-          DEPLOY_SCRIPT
-          
-          # Upload and extract
-          echo "📤 Uploading package..."
-          scp app.tar.gz deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/
-          
-          # Continue deployment
-          ssh deploy << 'DEPLOY_SCRIPT'
-            set -e
+            echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
+            echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
-            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
-            CURRENT_PATH="$DEPLOY_PATH/current"
-            SHARED_PATH="$DEPLOY_PATH/shared"
-            APP_PATH="$RELEASE_PATH"
+            # Check if we need to install dependencies
+            PACKAGE_HASH="${{ env.PACKAGE_HASH }}"
+            CURRENT_HASH=""
             
-            cd "$RELEASE_PATH"
+            if [ -f "$CURRENT_PATH/package-hash.txt" ]; then
+              CURRENT_HASH=$(cat "$CURRENT_PATH/package-hash.txt")
+            fi
             
-            echo "📦 Extracting package..."
-            tar -xzf app.tar.gz && rm app.tar.gz
+            # Install or copy dependencies
+            if [ "$CURRENT_HASH" = "$PACKAGE_HASH" ] && [ -d "$CURRENT_PATH/node_modules" ]; then
+              echo "📦 Package unchanged, copying node_modules..."
+              cp -r "$CURRENT_PATH/node_modules" "$STAGING_PATH/"
+            else
+              echo "📦 Installing production dependencies..."
+              npm ci --omit=dev --prefer-offline --no-audit --progress=false
+            fi
             
-            # Add PORT to environment file
-            echo "PORT=${{ env.PORT_APP }}" >> "$APP_PATH/.env.production"
-            echo "NODE_ENV=production" >> "$APP_PATH/.env.production"
+            # Save package hash
+            echo "$PACKAGE_HASH" > package-hash.txt
             
-            # Create optimized PM2 ecosystem for Pages Router
-            cat > "$RELEASE_PATH/ecosystem.config.js" << EOF
+            # Add environment variables
+            echo "PORT=$NEW_PORT" >> .env
+            echo "NODE_ENV=production" >> .env
+            
+            # Create PM2 ecosystem for new process
+            cat > ecosystem.config.js << EOF
           module.exports = {
             apps: [{
-              name: '${{ env.PROCESS_NAME }}',
+              name: '$NEW_PROCESS',
               script: 'node_modules/.bin/next',
               args: 'start',
-              cwd: '$APP_PATH',
+              cwd: '$STAGING_PATH',
               instances: 1,
               exec_mode: 'cluster',
               env: {
                 NODE_ENV: 'production',
-                PORT: '${{ env.PORT_APP }}',
-                PWD: '$APP_PATH',
+                PORT: '$NEW_PORT',
+                PWD: '$STAGING_PATH',
                 NEXT_TELEMETRY_DISABLED: '1'
               },
               max_memory_restart: '512M',
-              min_uptime: '15s',
-              max_restarts: 5,
+              min_uptime: '10s',
+              max_restarts: 3,
               autorestart: true,
               watch: false,
               kill_timeout: 8000,
               wait_ready: true,
-              listen_timeout: 20000,
-              error_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}-error.log',
-              out_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}-out.log',
-              log_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}.log',
+              listen_timeout: 15000,
+              error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
+              out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
+              log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
               time: true,
               merge_logs: true,
               source_map_support: true
@@ -301,33 +230,25 @@ jobs:
           };
           EOF
             
-            # Enhanced health check for Pages Router
+            # Start new process
+            echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
+            pm2 start ecosystem.config.js
+            
+            # Health check function
             health_check() {
+              local port=$1
               local attempts=0
               local max_attempts=30
-              local port=${{ env.PORT_APP }}
               
               echo "🔍 Starting health check on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
-                # Check if port is listening
-                if netstat -tuln | grep ":$port " > /dev/null 2>&1; then
-                  # Check if API responds
-                  if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (API responding)"
-                    return 0
-                  elif curl -f -s --max-time 3 "http://localhost:$port" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (home page responding)"
-                    return 0
-                  else
-                    echo "⚠️ Port listening but application not responding yet..."
-                  fi
-                else
-                  echo "⏳ Port $port not ready yet..."
+                if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
+                  echo "✅ Health check passed on port $port"
+                  return 0
                 fi
-                
                 attempts=$((attempts + 1))
-                echo "🔄 Attempt $attempts/$max_attempts..."
+                echo "🔄 Health check attempt $attempts/$max_attempts on port $port..."
                 sleep 2
               done
               
@@ -335,121 +256,86 @@ jobs:
               return 1
             }
             
-            # Backup current if exists
-            BACKUP_PATH=""
-            if [ -L "$CURRENT_PATH" ]; then
-              BACKUP_PATH=$(readlink "$CURRENT_PATH")
-              echo "💾 Backup: $BACKUP_PATH"
-            fi
+            # Wait for new process to be ready
+            echo "⏳ Waiting for new process to be ready..."
+            sleep 5
             
-            # Install dependencies only if needed
-            if [ "$SHOULD_INSTALL" = true ]; then
-              echo "📦 Installing production dependencies..."
-              cd "$RELEASE_PATH"
-              npm ci --omit=dev --prefer-offline --no-audit --progress=false
-            else
-              echo "📦 Reusing node_modules from current deployment..."
-              if [ -d "$CURRENT_PATH/node_modules" ]; then
-                cp -r "$CURRENT_PATH/node_modules" "$RELEASE_PATH/"
-              fi
-            fi
-            
-            # Use a temporary process name for the new version
-            TMP_PROCESS_NAME="${{ env.PROCESS_NAME }}-new"
-            
-            # Create temporary ecosystem file for new version
-            cat > "$RELEASE_PATH/tmp-ecosystem.config.js" << EOF
-          module.exports = {
-            apps: [{
-              name: '$TMP_PROCESS_NAME',
-              script: 'node_modules/.bin/next',
-              args: 'start',
-              cwd: '$APP_PATH',
-              instances: 1,
-              exec_mode: 'cluster',
-              env: {
-                NODE_ENV: 'production',
-                PORT: '${{ env.PORT_APP }}',
-                PWD: '$APP_PATH',
-                NEXT_TELEMETRY_DISABLED: '1'
-              },
-              max_memory_restart: '512M',
-              min_uptime: '15s',
-              max_restarts: 5,
-              autorestart: true,
-              watch: false,
-              kill_timeout: 8000,
-              wait_ready: true,
-              listen_timeout: 20000,
-              error_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME-error.log',
-              out_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME-out.log',
-              log_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME.log',
-              time: true,
-              merge_logs: true,
-              source_map_support: true
-            }]
-          };
+            if health_check $NEW_PORT; then
+              echo "✅ New process is healthy on port $NEW_PORT"
+              
+              # Update Nginx upstream to point to new port
+              echo "🔄 Updating Nginx to point to port $NEW_PORT..."
+              
+              sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
+          upstream test1_backend {
+              server 127.0.0.1:$NEW_PORT;
+          }
           EOF
-            
-            # Check if old process is running
-            OLD_RUNNING=false
-            if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
-              OLD_RUNNING=true
-            fi
-            
-            # Start the new process
-            echo "🚀 Starting new application version..."
-            cd "$RELEASE_PATH"
-            pm2 start tmp-ecosystem.config.js
-            
-            # Wait for process to initialize
-            echo "⏳ Waiting for new application to start..."
-            sleep 3
-            
-            # Check if new application is healthy
-            if health_check; then
-              echo "✅ New application is healthy"
               
-              # Switch the symlink BEFORE stopping old process
-              echo "🔄 Switching to new release..."
-              ln -snf "$RELEASE_PATH" "$CURRENT_PATH"
-              
-              # Stop the old process if it exists
-              if [ "$OLD_RUNNING" = true ]; then
-                echo "🛑 Gracefully stopping old process..."
-                pm2 stop ${{ env.PROCESS_NAME }} || true
-                sleep 2
-                pm2 delete ${{ env.PROCESS_NAME }} || true
+              # Test and reload Nginx
+              if sudo nginx -t; then
+                sudo nginx -s reload
+                echo "✅ Nginx reloaded successfully"
+                
+                # Wait for Nginx to pick up changes
+                sleep 3
+                
+                # Verify the switch worked
+                if curl -f -s --max-time 5 "https://test1.api.change-networks.com/api/health" > /dev/null 2>&1; then
+                  echo "✅ Traffic successfully switched to new version"
+                  
+                  # Stop old process if it exists
+                  if pm2 describe $OLD_PROCESS > /dev/null 2>&1; then
+                    echo "🛑 Gracefully stopping old process: $OLD_PROCESS"
+                    pm2 stop $OLD_PROCESS
+                    sleep 2
+                    pm2 delete $OLD_PROCESS
+                  fi
+                  
+                  # Backup current and move staging to current
+                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH)" ]; then
+                    rm -rf "$BACKUP_PATH"
+                    mv "$CURRENT_PATH" "$BACKUP_PATH"
+                  fi
+                  mv "$STAGING_PATH" "$CURRENT_PATH"
+                  
+                  # Save PM2 configuration
+                  pm2 save
+                  
+                  echo "🎉 Zero-downtime deployment completed successfully!"
+                  echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
+                  
+                else
+                  echo "❌ External health check failed after Nginx switch"
+                  
+                  # Rollback Nginx config
+                  if [ -n "$CURRENT_PORT" ]; then
+                    echo "🔄 Rolling back Nginx to port $CURRENT_PORT..."
+                    sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
+          upstream test1_backend {
+              server 127.0.0.1:$CURRENT_PORT;
+          }
+          EOF
+                    sudo nginx -s reload
+                  fi
+                  
+                  # Stop failed process
+                  pm2 stop $NEW_PROCESS || true
+                  pm2 delete $NEW_PROCESS || true
+                  
+                  exit 1
+                fi
+              else
+                echo "❌ Nginx configuration test failed"
+                pm2 stop $NEW_PROCESS || true
+                pm2 delete $NEW_PROCESS || true
+                exit 1
               fi
               
-              # Rename the new process to the standard name
-              echo "🔄 Renaming process..."
-              pm2 stop $TMP_PROCESS_NAME
-              pm2 delete $TMP_PROCESS_NAME
-              
-              # Start with the correct name
-              cd "$CURRENT_PATH"
-              pm2 start ecosystem.config.js
-              pm2 save
-              
-              echo "🎉 True zero-downtime deployment successful!"
-              
-              # Cleanup old releases (keep 3)
-              echo "🧹 Cleaning up old releases..."
-              cd "$DEPLOY_PATH/releases"
-              ls -t | tail -n +4 | xargs -r rm -rf
-              
-              echo "📊 Final PM2 status:"
-              pm2 status ${{ env.PROCESS_NAME }}
-              
             else
-              echo "❌ New application failed health check, aborting deployment"
-              
-              # Clean up the failed deployment
-              pm2 stop $TMP_PROCESS_NAME || true
-              pm2 delete $TMP_PROCESS_NAME || true
-              
-              echo "⚠️ Keeping current version active"
+              echo "❌ New process failed health check"
+              pm2 stop $NEW_PROCESS || true
+              pm2 delete $NEW_PROCESS || true
               exit 1
             fi
           DEPLOY_SCRIPT
@@ -458,37 +344,29 @@ jobs:
         run: |
           ssh deploy << 'VERIFY_SCRIPT'
             echo "📊 PM2 Status:"
-            pm2 status ${{ env.PROCESS_NAME }}
+            pm2 status
             
             echo ""
-            echo "🌐 Application Status:"
-            if curl -f -s --max-time 5 http://localhost:${{ env.PORT_APP }}/api/health > /dev/null; then
-              echo "✅ Application is responding correctly"
-              curl -s http://localhost:${{ env.PORT_APP }}/api/health
-            else
-              echo "❌ Application is not responding"
-              echo "🔍 Recent logs:"
-              pm2 logs ${{ env.PROCESS_NAME }} --lines 5
-            fi
+            echo "🌐 External Health Check:"
+            curl -s https://test1.api.change-networks.com/api/health
             
             echo ""
-            echo "📋 Deployment Info:"
-            cat ${{ env.DEPLOY_PATH }}/current/deployment-info.json 2>/dev/null || echo "No deployment info available"
+            echo "🔧 Nginx Upstream Config:"
+            cat /etc/nginx/conf.d/test1_backend.conf
             
             echo ""
-            echo "🔗 Symlink Check:"
+            echo "📋 Active Processes:"
+            netstat -tuln | grep -E ':(5005|5006) '
+            
+            echo ""
+            echo "🔗 Current Directory:"
             ls -la ${{ env.DEPLOY_PATH }}/current
-            readlink -f ${{ env.DEPLOY_PATH }}/current
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
         if: always()
         run: |
-          rm -f ~/.ssh/deploy_key 2>/dev/null || true
-          rm -f app.tar.gz 2>/dev/null || true
-          if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
-            rm -rf "$TEMP_DIR"
-          fi
+          rm -f ~/.ssh/deploy_key deployment.tar.gz
           echo "✅ Cleanup completed"
 
   notify:
@@ -499,11 +377,12 @@ jobs:
       - name: 📢 Deployment Status
         run: |
           if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "🎉 Deployment successful!"
+            echo "🎉 Test1 API deployment successful!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
             echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+            echo "🔗 URL: https://test1.api.change-networks.com"
           else
-            echo "❌ Deployment failed!"
+            echo "❌ Test1 API deployment failed!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
             echo "🔍 Check the logs above for details"
           fi
