@@ -53,33 +53,6 @@ jobs:
             echo "📦 Using cached dependencies"
           fi
 
-      - name: 🔧 Fix Next.js Config
-        run: |
-          # Remove any existing config files
-          rm -f next.config.ts next.config.mjs
-          
-          # Create a working next.config.js
-          cat > next.config.js << 'EOF'
-          /** @type {import('next').NextConfig} */
-          const nextConfig = {
-            reactStrictMode: true,
-            swcMinify: true,
-            eslint: {
-              ignoreDuringBuilds: true,
-            },
-            typescript: {
-              ignoreBuildErrors: true,
-            },
-            images: {
-              unoptimized: true,
-            },
-          }
-          
-          module.exports = nextConfig
-          EOF
-          
-          echo "✅ Created working next.config.js"
-
       - name: 🏗️ Build Application
         run: |
           npm run build
@@ -88,28 +61,22 @@ jobs:
       - name: 📦 Create Deployment Package
         run: |
           # Detect project structure (App Router vs Pages Router)
-          if [ -d "app" ] && [ -f "app/layout.tsx" -o -f "app/layout.js" ]; then
+          if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
-            # Include app directory for App Router
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.js
-          elif [ -d "pages" ]; then
+            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next app public package.json package-lock.json
+          else
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
-            # Include pages directory for Pages Router
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.js
-          else
-            echo "📂 Basic Next.js setup detected"
-            ROUTER_TYPE="basic"
-            # Just include .next and public for basic setup
-            tar -czf deployment.tar.gz .next public package.json package-lock.json next.config.js
+            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.* 2>/dev/null || \
+            tar -czf deployment.tar.gz .next pages public package.json package-lock.json
           fi
           
           # Create router type file for deployment script
           echo $ROUTER_TYPE > router-type.txt
           
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
-          echo "📂 Router type: $ROUTER_TYPE"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
@@ -175,13 +142,10 @@ jobs:
 
       - name: 🚀 Zero-Downtime Deploy with Port Switching
         run: |
-          # Create staging directory on server first
-          ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/staging"
-          
-          # Upload deployment package with correct filenames
+          # Upload deployment package
           echo "📤 Uploading deployment package..."
-          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/deployment.tar.gz
-          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/router-type.txt
+          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/
+          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/
           
           # Copy environment variables
           echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
@@ -209,41 +173,10 @@ jobs:
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
             
-            # Ensure we have a working next.config.js
-            if [ ! -f "next.config.js" ]; then
-              echo "📝 Creating next.config.js..."
-              cat > next.config.js << 'EOF'
-          /** @type {import('next').NextConfig} */
-          const nextConfig = {
-            reactStrictMode: true,
-            swcMinify: true,
-            eslint: {
-              ignoreDuringBuilds: true,
-            },
-            typescript: {
-              ignoreBuildErrors: true,
-            },
-            images: {
-              unoptimized: true,
-            },
-          }
-          
-          module.exports = nextConfig
-          EOF
-            fi
-            
-            # Remove any TypeScript config files
-            rm -f next.config.ts next.config.mjs
-            
             # Check current Nginx upstream port
             CURRENT_PORT=""
             if [ -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
               CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
-            fi
-            
-            # If no current port found, default to 5005
-            if [ -z "$CURRENT_PORT" ]; then
-              CURRENT_PORT="5005"
             fi
             
             # Determine new port (switch between 5005 and 5006)
@@ -260,66 +193,36 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Fix package.json for production dependencies only
-            echo "📦 Creating production package.json..."
-            cat > package.json << 'EOF'
-          {
-            "name": "test-4",
-            "version": "0.1.0",
-            "scripts": {
-              "start": "next start"
-            },
-            "dependencies": {
-              "next": "14.1.0",
-              "react": "18.2.0",
-              "react-dom": "18.2.0"
-            }
-          }
-          EOF
+            # Check if we need to install dependencies
+            PACKAGE_HASH="${{ env.PACKAGE_HASH }}"
+            CURRENT_HASH=""
             
-            # Install production dependencies
-            echo "📦 Installing production dependencies..."
-            rm -rf node_modules package-lock.json 2>/dev/null || true
-            npm install --omit=dev --prefer-offline --no-audit --progress=false
-            
-            # Verify Next.js installation
-            if [ ! -f "node_modules/.bin/next" ]; then
-              echo "❌ Next.js binary not found after installation"
-              exit 1
+            if [ -f "$CURRENT_PATH/package-hash.txt" ]; then
+              CURRENT_HASH=$(cat "$CURRENT_PATH/package-hash.txt")
             fi
             
-            # Verify critical Next.js modules
-            if [ ! -d "node_modules/next/dist/compiled" ]; then
-              echo "❌ Next.js compiled modules not found"
-              exit 1
-            fi
-            
-            echo "✅ Dependencies installed and verified"
-            
-            # Verify .next directory structure
-            echo "🔍 Checking .next directory structure..."
-            if [ ! -d ".next/server" ] || [ ! -d ".next/static" ]; then
-              echo "❌ .next directory structure is incomplete"
-              ls -la .next
-              exit 1
+            # Install or copy dependencies
+            if [ "$CURRENT_HASH" = "$PACKAGE_HASH" ] && [ -d "$CURRENT_PATH/node_modules" ]; then
+              echo "📦 Package unchanged, copying node_modules..."
+              cp -r "$CURRENT_PATH/node_modules" "$STAGING_PATH/"
+            else
+              echo "📦 Installing production dependencies..."
+              npm ci --omit=dev --prefer-offline --no-audit --progress=false
             fi
             
             # Save package hash
-            echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
+            echo "$PACKAGE_HASH" > package-hash.txt
             
             # Add environment variables
             echo "PORT=$NEW_PORT" >> .env
             echo "NODE_ENV=production" >> .env
             
-            # Create logs directory
-            mkdir -p "$DEPLOY_PATH/logs"
-            
-            # Create PM2 ecosystem for new process with absolute paths
+            # Create PM2 ecosystem for new process
             cat > ecosystem.config.js << EOF
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
-              script: '$STAGING_PATH/node_modules/.bin/next',
+              script: 'node_modules/.bin/next',
               args: 'start',
               cwd: '$STAGING_PATH',
               instances: 1,
@@ -352,16 +255,23 @@ jobs:
             echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.js
             
-            # Health check function
+            # Health check function based on router type
             health_check() {
               local port=$1
               local attempts=0
               local max_attempts=30
+              local health_endpoint=""
               
-              echo "🔍 Starting health check on port $port using /api/health..."
+              if [ "$ROUTER_TYPE" = "app" ]; then
+                health_endpoint="/api/health"
+              else
+                health_endpoint="/api/health"
+              fi
+              
+              echo "🔍 Starting health check on port $port using $health_endpoint..."
               
               while [ $attempts -lt $max_attempts ]; do
-                if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
+                if curl -f -s --max-time 3 "http://localhost:$port$health_endpoint" > /dev/null 2>&1; then
                   echo "✅ Health check passed on port $port"
                   return 0
                 fi
@@ -371,16 +281,12 @@ jobs:
               done
               
               echo "❌ Health check failed after $max_attempts attempts"
-              echo "🔍 Checking if port is listening..."
-              netstat -tuln | grep ":$port " || echo "Port $port is not listening"
-              echo "🔍 Checking PM2 logs..."
-              pm2 logs $NEW_PROCESS --lines 20 || true
               return 1
             }
             
             # Wait for new process to be ready
             echo "⏳ Waiting for new process to be ready..."
-            sleep 8
+            sleep 5
             
             if health_check $NEW_PORT; then
               echo "✅ New process is healthy on port $NEW_PORT"
@@ -415,62 +321,18 @@ jobs:
                   fi
                   
                   # Backup current and move staging to current
-                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH 2>/dev/null)" ]; then
+                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH)" ]; then
                     rm -rf "$BACKUP_PATH"
                     mv "$CURRENT_PATH" "$BACKUP_PATH"
                   fi
-                  
-                  # Copy staging to current instead of moving to preserve PM2 working directory
-                  cp -r "$STAGING_PATH" "$CURRENT_PATH"
-                  rm -rf "$STAGING_PATH"
+                  mv "$STAGING_PATH" "$CURRENT_PATH"
                   mkdir -p "$STAGING_PATH"
-                  
-                  # Update PM2 process to use current path
-                  cd "$CURRENT_PATH"
-                  
-                  # Create new ecosystem config with current path
-                  cat > ecosystem.config.js << EOF
-          module.exports = {
-            apps: [{
-              name: '$NEW_PROCESS',
-              script: '$CURRENT_PATH/node_modules/.bin/next',
-              args: 'start',
-              cwd: '$CURRENT_PATH',
-              instances: 1,
-              exec_mode: 'cluster',
-              env: {
-                NODE_ENV: 'production',
-                PORT: '$NEW_PORT',
-                PWD: '$CURRENT_PATH',
-                NEXT_TELEMETRY_DISABLED: '1'
-              },
-              max_memory_restart: '512M',
-              min_uptime: '10s',
-              max_restarts: 3,
-              autorestart: true,
-              watch: false,
-              kill_timeout: 8000,
-              wait_ready: true,
-              listen_timeout: 15000,
-              error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
-              out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
-              log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
-              time: true,
-              merge_logs: true,
-              source_map_support: true
-            }]
-          };
-          EOF
-                  
-                  # Restart PM2 process with new config
-                  pm2 restart $NEW_PROCESS
                   
                   # Save PM2 configuration
                   pm2 save
                   
                   echo "🎉 Zero-downtime deployment completed successfully!"
                   echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
-                  echo "📂 Working directory: $CURRENT_PATH"
                   
                 else
                   echo "❌ External health check failed after Nginx switch"
@@ -535,21 +397,3 @@ jobs:
         run: |
           rm -f ~/.ssh/deploy_key deployment.tar.gz router-type.txt
           echo "✅ Cleanup completed"
-
-  notify:
-    needs: [build, deploy]
-    runs-on: self-hosted
-    if: always()
-    steps:
-      - name: 📢 Deployment Status
-        run: |
-          if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "🎉 Test1 API deployment successful!"
-            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
-            echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
-            echo "🔗 URL: https://test1.api.change-networks.com"
-          else
-            echo "❌ Test1 API deployment failed!"
-            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
-            echo "🔍 Check the logs above for details"
-          fi
