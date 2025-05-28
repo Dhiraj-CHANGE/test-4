@@ -137,7 +137,7 @@ jobs:
           
           if [ "$BRANCH" = "main" ]; then
             # Production environment
-            echo "DEPLOY_PATH=/var/www/test-4" >> $GITHUB_ENV
+            echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
@@ -151,7 +151,7 @@ jobs:
             
           else
             # Development environment
-            echo "DEPLOY_PATH=/var/www/test-4-dev" >> $GITHUB_ENV
+            echo "DEPLOY_PATH=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
