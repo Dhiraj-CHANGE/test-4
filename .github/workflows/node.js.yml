@@ -228,7 +228,7 @@ jobs:
             echo "NODE_ENV=production" >> .env
             
             # Create PM2 ecosystem for new process
-            cat > ecosystem.config.js << EOF
+            cat > ecosystem.config.cjs << EOF
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
