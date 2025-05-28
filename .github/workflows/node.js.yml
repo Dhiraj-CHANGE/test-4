@@ -210,23 +210,6 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Fix package.json for production dependencies only
-            echo "📦 Creating production package.json..."
-            cat > package.json << 'EOF'
-          {
-            "name": "test-4",
-            "version": "0.1.0",
-            "scripts": {
-              "start": "next start"
-            },
-            "dependencies": {
-              "next": "15.3.2",
-              "react": "^19.0.0",
-              "react-dom": "^19.0.0"
-            }
-          }
-          EOF
-            
             # Install production dependencies
             echo "📦 Installing production dependencies..."
             rm -rf node_modules package-lock.json 2>/dev/null || true
