@@ -34,7 +34,7 @@ export default function Home() {
             .
           </li>
           <li className="tracking-[-.01em]">
-            Dhiraj Chaudhari  
+            Dhiraj Chaudhari CHANGE 
           </li>
         </ol>
         <div className="flex gap-4 items-center flex-col sm:flex-row">
