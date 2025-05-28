@@ -44,18 +44,26 @@ jobs:
           # Create minimal production package
           mkdir -p dist
           
+          # Verify .next directory exists
+          if [ ! -d ".next" ]; then
+            echo "❌ .next directory not found. Build may have failed."
+            exit 1
+          fi
+          
           # Copy Next.js build output for Pages Router
           cp -r .next dist/
-          cp -r pages dist/ 2>/dev/null || echo "No pages directory found"
-          cp -r public dist/ 2>/dev/null || echo "No public directory found"
-          cp package.json package-lock.json dist/
           
-          # Copy other essential directories for Pages Router
+          # Copy essential directories (only if they exist)
+          [ -d "pages" ] && cp -r pages dist/ || echo "No pages directory found"
+          [ -d "public" ] && cp -r public dist/ || echo "No public directory found"
           [ -d "styles" ] && cp -r styles dist/ || echo "No styles directory"
           [ -d "components" ] && cp -r components dist/ || echo "No components directory"
           [ -d "lib" ] && cp -r lib dist/ || echo "No lib directory"
           [ -d "utils" ] && cp -r utils dist/ || echo "No utils directory"
           [ -d "hooks" ] && cp -r hooks dist/ || echo "No hooks directory"
+          
+          # Copy package files
+          cp package.json package-lock.json dist/
           
           # Copy Next.js config if it exists
           [ -f "next.config.js" ] && cp next.config.js dist/ || echo "No next.config.js"
@@ -77,19 +85,27 @@ jobs:
           "
           
           # Install only production deps
-          cd dist && npm ci --production --prefer-offline --no-audit --progress=false
+          cd dist && npm ci --omit=dev --prefer-offline --no-audit --progress=false
+          cd ..
           
-          # Create deployment info file
-          echo "{
-            \"id\": \"${{ steps.meta.outputs.deployment-id }}\",
-            \"branch\": \"${GITHUB_REF##*/}\",
-            \"commit\": \"${GITHUB_SHA}\",
-            \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-            \"size\": \"$(du -sh dist | cut -f1)\",
-            \"router\": \"pages\"
-          }" > dist/deployment-info.json
-          
-          echo "📦 Package size: $(du -sh dist | cut -f1)"
+          # Verify dist directory exists before creating deployment info
+          if [ -d "dist" ]; then
+            # Create deployment info file
+            cat > dist/deployment-info.json << EOF
+          {
+            "id": "${{ steps.meta.outputs.deployment-id }}",
+            "branch": "${GITHUB_REF##*/}",
+            "commit": "${GITHUB_SHA}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "size": "$(du -sh dist | cut -f1)",
+            "router": "pages"
+          }
+          EOF
+            echo "📦 Package size: $(du -sh dist | cut -f1)"
+          else
+            echo "❌ Failed to create dist directory"
+            exit 1
+          fi
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
