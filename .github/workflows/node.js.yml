@@ -60,31 +60,16 @@ jobs:
 
       - name: 📦 Create Deployment Package
         run: |
-          # Detect project structure (App Router vs Pages Router)
-          if [ -d "app" ]; then
-            echo "📂 App Router detected"
-            ROUTER_TYPE="app"
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
-            tar -czf deployment.tar.gz .next app public package.json package-lock.json
-          else
-            echo "📂 Pages Router detected"
-            ROUTER_TYPE="pages"
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json next.config.* 2>/dev/null || \
-            tar -czf deployment.tar.gz .next pages public package.json package-lock.json
-          fi
-          
-          # Create router type file for deployment script
-          echo $ROUTER_TYPE > router-type.txt
-          
+          # Create deployment tarball with only necessary files
+          tar -czf deployment.tar.gz .next app public package.json package-lock.json next.config.* 2>/dev/null || \
+          tar -czf deployment.tar.gz .next app public package.json package-lock.json
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ steps.meta.outputs.deployment-id }}
-          path: |
-            deployment.tar.gz
-            router-type.txt
+          path: deployment.tar.gz
           retention-days: 1
 
   deploy:
@@ -101,8 +86,6 @@ jobs:
       - name: ⚙️ Setup Environment
         run: |
           BRANCH=${GITHUB_REF##*/}
-          ROUTER_TYPE=$(cat router-type.txt)
-          echo "ROUTER_TYPE=$ROUTER_TYPE" >> $GITHUB_ENV
           
           if [ "$BRANCH" = "main" ]; then
             echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
@@ -145,7 +128,6 @@ jobs:
           # Upload deployment package
           echo "📤 Uploading deployment package..."
           scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/
-          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/
           
           # Copy environment variables
           echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
@@ -159,9 +141,6 @@ jobs:
             STAGING_PATH="$DEPLOY_PATH/staging"
             CURRENT_PATH="$DEPLOY_PATH/current"
             BACKUP_PATH="$DEPLOY_PATH/backup"
-            ROUTER_TYPE=$(cat "$STAGING_PATH/router-type.txt")
-            
-            echo "📂 Detected router type: $ROUTER_TYPE"
             
             # Create directories
             mkdir -p "$STAGING_PATH" "$CURRENT_PATH" "$BACKUP_PATH" "$DEPLOY_PATH/logs"
@@ -255,23 +234,16 @@ jobs:
             echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.js
             
-            # Health check function based on router type
+            # Health check function
             health_check() {
               local port=$1
               local attempts=0
               local max_attempts=30
-              local health_endpoint=""
               
-              if [ "$ROUTER_TYPE" = "app" ]; then
-                health_endpoint="/api/health"
-              else
-                health_endpoint="/api/health"
-              fi
-              
-              echo "🔍 Starting health check on port $port using $health_endpoint..."
+              echo "🔍 Starting health check on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
-                if curl -f -s --max-time 3 "http://localhost:$port$health_endpoint" > /dev/null 2>&1; then
+                if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
                   echo "✅ Health check passed on port $port"
                   return 0
                 fi
@@ -326,7 +298,6 @@ jobs:
                     mv "$CURRENT_PATH" "$BACKUP_PATH"
                   fi
                   mv "$STAGING_PATH" "$CURRENT_PATH"
-                  mkdir -p "$STAGING_PATH"
                   
                   # Save PM2 configuration
                   pm2 save
@@ -395,5 +366,23 @@ jobs:
       - name: 🧹 Cleanup
         if: always()
         run: |
-          rm -f ~/.ssh/deploy_key deployment.tar.gz router-type.txt
+          rm -f ~/.ssh/deploy_key deployment.tar.gz
           echo "✅ Cleanup completed"
+
+  notify:
+    needs: [build, deploy]
+    runs-on: self-hosted
+    if: always()
+    steps:
+      - name: 📢 Deployment Status
+        run: |
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "🎉 Test1 API deployment successful!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+            echo "🔗 URL: https://test1.api.change-networks.com"
+          else
+            echo "❌ Test1 API deployment failed!"
+            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
+            echo "🔍 Check the logs above for details"
+          fi
