@@ -1,4 +1,4 @@
-name: ⚡ Fast Deploy
+name: ⚡ Lightning Deploy
 
 on:
   push:
@@ -12,6 +12,7 @@ jobs:
     runs-on: self-hosted
     outputs:
       deployment-id: ${{ steps.meta.outputs.deployment-id }}
+      package-hash: ${{ steps.hash.outputs.package-hash }}
     steps:
       - name: 📋 Checkout
         uses: actions/checkout@v4
@@ -22,6 +23,13 @@ jobs:
           DEPLOYMENT_ID="$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
           echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
           echo "🆔 Deployment ID: $DEPLOYMENT_ID"
+
+      - name: 📊 Generate Package Hash
+        id: hash
+        run: |
+          PACKAGE_HASH=$(sha256sum package.json | cut -d ' ' -f 1)
+          echo "package-hash=$PACKAGE_HASH" >> $GITHUB_OUTPUT
+          echo "📦 Package Hash: $PACKAGE_HASH"
 
       - name: ⚡ Setup Node.js
         uses: actions/setup-node@v4
@@ -62,6 +70,7 @@ jobs:
           [ -d "utils" ] && cp -r utils dist/ || echo "No utils directory"
           [ -d "hooks" ] && cp -r hooks dist/ || echo "No hooks directory"
           [ -d "scripts" ] && cp -r scripts dist/ || echo "No scripts directory"
+          [ -d "app" ] && cp -r app dist/ || echo "No app directory"
           
           # Copy package files
           cp package.json package-lock.json dist/
@@ -70,40 +79,19 @@ jobs:
           [ -f "next.config.js" ] && cp next.config.js dist/ || echo "No next.config.js"
           [ -f "next.config.mjs" ] && cp next.config.mjs dist/ || echo "No next.config.mjs"
           
-          # Create minimal package.json for Pages Router
-          node -e "
-            const pkg = require('./package.json');
-            const minimal = {
-              name: pkg.name,
-              version: pkg.version,
-              scripts: pkg.scripts, // Keep original scripts
-              dependencies: pkg.dependencies
-            };
-            require('fs').writeFileSync('dist/package.json', JSON.stringify(minimal, null, 2));
-          "
-          
-          # Install only production deps
-          cd dist && npm ci --omit=dev --prefer-offline --no-audit --progress=false
-          cd ..
-          
-          # Verify dist directory exists before creating deployment info
-          if [ -d "dist" ]; then
-            # Create deployment info file
-            cat > dist/deployment-info.json << EOF
+          # Create deployment info file
+          cat > dist/deployment-info.json << EOF
           {
             "id": "${{ steps.meta.outputs.deployment-id }}",
             "branch": "${GITHUB_REF##*/}",
             "commit": "${GITHUB_SHA}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "size": "$(du -sh dist | cut -f1)",
-            "router": "pages"
+            "router": "pages",
+            "package_hash": "${{ steps.hash.outputs.package-hash }}"
           }
           EOF
-            echo "📦 Package size: $(du -sh dist | cut -f1)"
-          else
-            echo "❌ Failed to create dist directory"
-            exit 1
-          fi
+          echo "📦 Package size: $(du -sh dist | cut -f1)"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
@@ -111,7 +99,7 @@ jobs:
           name: app-${{ steps.meta.outputs.deployment-id }}
           path: dist
           retention-days: 1
-          compression-level: 6
+          compression-level: 9
 
   deploy:
     needs: build
@@ -129,6 +117,7 @@ jobs:
         run: |
           BRANCH=${GITHUB_REF##*/}
           DEPLOYMENT_ID="${{ needs.build.outputs.deployment-id }}"
+          PACKAGE_HASH="${{ needs.build.outputs.package-hash }}"
           
           # Create temporary files for secure handling
           TEMP_DIR=$(mktemp -d)
@@ -163,6 +152,7 @@ jobs:
           fi
           
           echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
+          echo "PACKAGE_HASH=$PACKAGE_HASH" >> $GITHUB_ENV
           echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
           
           # Set secure permissions
@@ -189,15 +179,6 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           chmod 700 ~/.ssh
           
-          # Validate SSH key format
-          if ! ssh-keygen -l -f ~/.ssh/deploy_key > /dev/null 2>&1; then
-            echo "❌ Invalid SSH key format"
-            echo "🔍 SSH key content (first/last lines):"
-            head -1 ~/.ssh/deploy_key
-            tail -1 ~/.ssh/deploy_key
-            exit 1
-          fi
-          
           # Create SSH config with better settings
           cat > ~/.ssh/config << EOF
           Host deploy
@@ -222,19 +203,17 @@ jobs:
             echo "✅ SSH connection verified"
           else
             echo "❌ SSH connection failed"
-            echo "🔍 Debugging SSH connection..."
-            ssh -vvv -o ConnectTimeout=10 deploy "echo 'test'" 2>&1 | head -20
             exit 1
           fi
 
-      - name: 🚀 Zero-Downtime Deploy
+      - name: 🚀 True Zero-Downtime Deploy
         run: |
           # Create deployment package
           cd dist
           tar -czf ../app.tar.gz .
           cd ..
           
-          # Deploy with zero-downtime script
+          # Deploy with optimized zero-downtime script
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
@@ -242,10 +221,27 @@ jobs:
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
             RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
             CURRENT_PATH="$DEPLOY_PATH/current"
+            SHARED_PATH="$DEPLOY_PATH/shared"
+            
+            # Create directory structure
+            mkdir -p "$RELEASE_PATH" "$SHARED_PATH/logs" "$SHARED_PATH/node_modules"
+            
+            # Get current package hash if available
+            CURRENT_HASH=""
+            if [ -L "$CURRENT_PATH" ] && [ -f "$CURRENT_PATH/deployment-info.json" ]; then
+              CURRENT_HASH=$(grep -o '"package_hash":"[^"]*"' "$CURRENT_PATH/deployment-info.json" | cut -d'"' -f4)
+            fi
+            
+            # Check if we need to reinstall dependencies
+            SHOULD_INSTALL=true
+            if [ "$CURRENT_HASH" = "${{ env.PACKAGE_HASH }}" ]; then
+              echo "📦 Package.json unchanged, will reuse node_modules"
+              SHOULD_INSTALL=false
+            else
+              echo "📦 Package.json changed, will reinstall dependencies"
+            fi
             
             echo "🏗️ Setting up release directory..."
-            mkdir -p "$RELEASE_PATH" "$DEPLOY_PATH/shared/logs"
-            
           DEPLOY_SCRIPT
           
           # Upload and extract
@@ -259,26 +255,13 @@ jobs:
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
             RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
             CURRENT_PATH="$DEPLOY_PATH/current"
+            SHARED_PATH="$DEPLOY_PATH/shared"
             APP_PATH="$RELEASE_PATH"
             
             cd "$RELEASE_PATH"
             
             echo "📦 Extracting package..."
             tar -xzf app.tar.gz && rm app.tar.gz
-          DEPLOY_SCRIPT
-          
-          # Upload environment file separately
-          echo "📤 Uploading environment configuration..."
-          scp "$TEMP_DIR/env_vars" deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/.env.production
-          
-          # Continue with the rest of deployment
-          ssh deploy << 'DEPLOY_SCRIPT'
-            set -e
-            
-            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
-            RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
-            CURRENT_PATH="$DEPLOY_PATH/current"
-            APP_PATH="$RELEASE_PATH"
             
             # Add PORT to environment file
             echo "PORT=${{ env.PORT_APP }}" >> "$APP_PATH/.env.production"
@@ -289,7 +272,7 @@ jobs:
           module.exports = {
             apps: [{
               name: '${{ env.PROCESS_NAME }}',
-              script: '$APP_PATH/node_modules/.bin/next',
+              script: 'node_modules/.bin/next',
               args: 'start',
               cwd: '$APP_PATH',
               instances: 1,
@@ -305,12 +288,12 @@ jobs:
               max_restarts: 5,
               autorestart: true,
               watch: false,
-              kill_timeout: 5000,
+              kill_timeout: 8000,
               wait_ready: true,
               listen_timeout: 20000,
-              error_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-error.log',
-              out_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}-out.log',
-              log_file: '$DEPLOY_PATH/shared/logs/${{ env.PROCESS_NAME }}.log',
+              error_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}-error.log',
+              out_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}-out.log',
+              log_file: '$SHARED_PATH/logs/${{ env.PROCESS_NAME }}.log',
               time: true,
               merge_logs: true,
               source_map_support: true
@@ -321,23 +304,23 @@ jobs:
             # Enhanced health check for Pages Router
             health_check() {
               local attempts=0
-              local max_attempts=40
+              local max_attempts=30
               local port=${{ env.PORT_APP }}
               
-              echo "🔍 Starting health check for Pages Router on port $port..."
+              echo "🔍 Starting health check on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
                 # Check if port is listening
                 if netstat -tuln | grep ":$port " > /dev/null 2>&1; then
-                  # Check if Pages Router API responds
-                  if curl -f -s --max-time 5 "http://localhost:$port/api/health" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (Pages Router API responding)"
+                  # Check if API responds
+                  if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (API responding)"
                     return 0
-                  elif curl -f -s --max-time 5 "http://localhost:$port" > /dev/null 2>&1; then
-                    echo "✅ Health check passed (Pages Router home page responding)"
+                  elif curl -f -s --max-time 3 "http://localhost:$port" > /dev/null 2>&1; then
+                    echo "✅ Health check passed (home page responding)"
                     return 0
                   else
-                    echo "⚠️ Port listening but Pages Router not responding yet..."
+                    echo "⚠️ Port listening but application not responding yet..."
                   fi
                 else
                   echo "⏳ Port $port not ready yet..."
@@ -345,12 +328,10 @@ jobs:
                 
                 attempts=$((attempts + 1))
                 echo "🔄 Attempt $attempts/$max_attempts..."
-                sleep 3
+                sleep 2
               done
               
               echo "❌ Health check failed after $max_attempts attempts"
-              echo "🔍 Checking PM2 logs..."
-              pm2 logs ${{ env.PROCESS_NAME }} --lines 10 || true
               return 1
             }
             
@@ -361,19 +342,27 @@ jobs:
               echo "💾 Backup: $BACKUP_PATH"
             fi
             
-            # Start new process BEFORE stopping the old one (zero downtime)
-            echo "🚀 Starting new application version..."
-            cd "$RELEASE_PATH"
+            # Install dependencies only if needed
+            if [ "$SHOULD_INSTALL" = true ]; then
+              echo "📦 Installing production dependencies..."
+              cd "$RELEASE_PATH"
+              npm ci --omit=dev --prefer-offline --no-audit --progress=false
+            else
+              echo "📦 Reusing node_modules from current deployment..."
+              if [ -d "$CURRENT_PATH/node_modules" ]; then
+                cp -r "$CURRENT_PATH/node_modules" "$RELEASE_PATH/"
+              fi
+            fi
             
             # Use a temporary process name for the new version
             TMP_PROCESS_NAME="${{ env.PROCESS_NAME }}-new"
             
-            # Create temporary ecosystem file
+            # Create temporary ecosystem file for new version
             cat > "$RELEASE_PATH/tmp-ecosystem.config.js" << EOF
           module.exports = {
             apps: [{
               name: '$TMP_PROCESS_NAME',
-              script: '$APP_PATH/node_modules/.bin/next',
+              script: 'node_modules/.bin/next',
               args: 'start',
               cwd: '$APP_PATH',
               instances: 1,
@@ -389,12 +378,12 @@ jobs:
               max_restarts: 5,
               autorestart: true,
               watch: false,
-              kill_timeout: 5000,
+              kill_timeout: 8000,
               wait_ready: true,
               listen_timeout: 20000,
-              error_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME-error.log',
-              out_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME-out.log',
-              log_file: '$DEPLOY_PATH/shared/logs/$TMP_PROCESS_NAME.log',
+              error_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME-error.log',
+              out_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME-out.log',
+              log_file: '$SHARED_PATH/logs/$TMP_PROCESS_NAME.log',
               time: true,
               merge_logs: true,
               source_map_support: true
@@ -402,26 +391,35 @@ jobs:
           };
           EOF
             
+            # Check if old process is running
+            OLD_RUNNING=false
+            if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
+              OLD_RUNNING=true
+            fi
+            
             # Start the new process
+            echo "🚀 Starting new application version..."
+            cd "$RELEASE_PATH"
             pm2 start tmp-ecosystem.config.js
             
             # Wait for process to initialize
             echo "⏳ Waiting for new application to start..."
-            sleep 5
+            sleep 3
             
             # Check if new application is healthy
             if health_check; then
               echo "✅ New application is healthy"
               
-              # Switch the symlink
+              # Switch the symlink BEFORE stopping old process
               echo "🔄 Switching to new release..."
               ln -snf "$RELEASE_PATH" "$CURRENT_PATH"
               
               # Stop the old process if it exists
-              if pm2 describe ${{ env.PROCESS_NAME }} > /dev/null 2>&1; then
-                echo "🛑 Stopping old process..."
-                pm2 stop ${{ env.PROCESS_NAME }}
-                pm2 delete ${{ env.PROCESS_NAME }}
+              if [ "$OLD_RUNNING" = true ]; then
+                echo "🛑 Gracefully stopping old process..."
+                pm2 stop ${{ env.PROCESS_NAME }} || true
+                sleep 2
+                pm2 delete ${{ env.PROCESS_NAME }} || true
               fi
               
               # Rename the new process to the standard name
@@ -434,7 +432,7 @@ jobs:
               pm2 start ecosystem.config.js
               pm2 save
               
-              echo "🎉 Zero-downtime deployment successful!"
+              echo "🎉 True zero-downtime deployment successful!"
               
               # Cleanup old releases (keep 3)
               echo "🧹 Cleaning up old releases..."
@@ -464,8 +462,9 @@ jobs:
             
             echo ""
             echo "🌐 Application Status:"
-            if curl -f -s --max-time 5 http://localhost:${{ env.PORT_APP }} > /dev/null; then
+            if curl -f -s --max-time 5 http://localhost:${{ env.PORT_APP }}/api/health > /dev/null; then
               echo "✅ Application is responding correctly"
+              curl -s http://localhost:${{ env.PORT_APP }}/api/health
             else
               echo "❌ Application is not responding"
               echo "🔍 Recent logs:"
@@ -475,10 +474,6 @@ jobs:
             echo ""
             echo "📋 Deployment Info:"
             cat ${{ env.DEPLOY_PATH }}/current/deployment-info.json 2>/dev/null || echo "No deployment info available"
-            
-            echo ""
-            echo "💾 Disk Usage:"
-            du -sh ${{ env.DEPLOY_PATH }}/releases/* 2>/dev/null | tail -3 || echo "No releases found"
             
             echo ""
             echo "🔗 Symlink Check:"
