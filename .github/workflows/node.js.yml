@@ -210,16 +210,25 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Check if we need to install dependencies
-            PACKAGE_HASH="${{ env.PACKAGE_HASH }}"
-            CURRENT_HASH=""
+            # Fix package.json for production dependencies only
+            echo "📦 Creating production package.json..."
+            cat > package.json << 'EOF'
+          {
+            "name": "test-4",
+            "version": "0.1.0",
+            "scripts": {
+              "start": "next start"
+            },
+            "dependencies": {
+              "next": "15.3.2",
+              "react": "^19.0.0",
+              "react-dom": "^19.0.0"
+            }
+          }
+          EOF
             
-            if [ -f "$CURRENT_PATH/package-hash.txt" ]; then
-              CURRENT_HASH=$(cat "$CURRENT_PATH/package-hash.txt")
-            fi
-            
-            # Always install fresh dependencies to avoid MODULE_NOT_FOUND errors
-            echo "📦 Installing fresh production dependencies..."
+            # Install production dependencies
+            echo "📦 Installing production dependencies..."
             rm -rf node_modules package-lock.json 2>/dev/null || true
             npm install --omit=dev --prefer-offline --no-audit --progress=false
             
@@ -238,7 +247,7 @@ jobs:
             echo "✅ Dependencies installed and verified"
             
             # Save package hash
-            echo "$PACKAGE_HASH" > package-hash.txt
+            echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
             
             # Add environment variables
             echo "PORT=$NEW_PORT" >> .env
