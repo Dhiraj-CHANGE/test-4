@@ -12,7 +12,6 @@ jobs:
     runs-on: self-hosted
     outputs:
       deployment-id: ${{ steps.meta.outputs.deployment-id }}
-      cache-key: ${{ steps.meta.outputs.cache-key }}
     steps:
       - name: 📋 Checkout
         uses: actions/checkout@v4
@@ -21,9 +20,7 @@ jobs:
         id: meta
         run: |
           DEPLOYMENT_ID="$(date +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"
-          CACHE_KEY="build-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('package-lock.json') }}"
           echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
-          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
           echo "🆔 Deployment ID: $DEPLOYMENT_ID"
 
       - name: ⚡ Setup Node.js
@@ -31,17 +28,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-
-      - name: 📦 Cache Dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.npm
-            node_modules
-            .next/cache
-          key: ${{ steps.meta.outputs.cache-key }}
-          restore-keys: |
-            build-${{ runner.os }}-node${{ env.NODE_VERSION }}-
 
       - name: 🔧 Install Dependencies
         run: |
@@ -93,17 +79,15 @@ jobs:
           # Install only production deps
           cd dist && npm ci --production --prefer-offline --no-audit --progress=false
           
-          # Create deployment manifest
-          cat > deployment.json << EOF
-          {
-            "id": "${{ steps.meta.outputs.deployment-id }}",
-            "branch": "${GITHUB_REF##*/}",
-            "commit": "${GITHUB_SHA}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "size": "$(du -sh dist | cut -f1)",
-            "router": "pages"
-          }
-          EOF
+          # Create deployment info file
+          echo "{
+            \"id\": \"${{ steps.meta.outputs.deployment-id }}\",
+            \"branch\": \"${GITHUB_REF##*/}\",
+            \"commit\": \"${GITHUB_SHA}\",
+            \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+            \"size\": \"$(du -sh dist | cut -f1)\",
+            \"router\": \"pages\"
+          }" > dist/deployment-info.json
           
           echo "📦 Package size: $(du -sh dist | cut -f1)"
 
@@ -111,9 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ steps.meta.outputs.deployment-id }}
-          path: |
-            dist
-            deployment.json
+          path: dist
           retention-days: 1
           compression-level: 6
 
@@ -126,6 +108,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-${{ needs.build.outputs.deployment-id }}
+          path: dist
 
       - name: ⚙️ Setup Environment
         id: env
@@ -197,7 +180,9 @@ jobs:
       - name: 🚀 Lightning Deploy
         run: |
           # Create deployment package
-          tar -czf app.tar.gz dist deployment.json
+          cd dist
+          tar -czf ../app.tar.gz .
+          cd ..
           
           # Deploy with optimized script
           ssh deploy << 'DEPLOY_SCRIPT'
@@ -224,7 +209,7 @@ jobs:
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
             RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
             CURRENT_PATH="$DEPLOY_PATH/current"
-            APP_PATH="$RELEASE_PATH/dist"
+            APP_PATH="$RELEASE_PATH"
             
             cd "$RELEASE_PATH"
             
@@ -234,7 +219,7 @@ jobs:
           
           # Upload environment file separately
           echo "📤 Uploading environment configuration..."
-          scp "$TEMP_DIR/env_vars" deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/dist/.env.production
+          scp "$TEMP_DIR/env_vars" deploy:${{ env.DEPLOY_PATH }}/releases/${{ env.DEPLOYMENT_ID }}/.env.production
           
           # Continue with the rest of deployment
           ssh deploy << 'DEPLOY_SCRIPT'
@@ -243,7 +228,7 @@ jobs:
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
             RELEASE_PATH="$DEPLOY_PATH/releases/${{ env.DEPLOYMENT_ID }}"
             CURRENT_PATH="$DEPLOY_PATH/current"
-            APP_PATH="$RELEASE_PATH/dist"
+            APP_PATH="$RELEASE_PATH"
             
             # Add PORT to environment file
             echo "PORT=${{ env.PORT_APP }}" >> "$APP_PATH/.env.production"
@@ -397,7 +382,7 @@ jobs:
             
             echo ""
             echo "📋 Deployment Info:"
-            cat ${{ env.DEPLOY_PATH }}/current/deployment.json 2>/dev/null || echo "No deployment info available"
+            cat ${{ env.DEPLOY_PATH }}/current/deployment-info.json 2>/dev/null || echo "No deployment info available"
             
             echo ""
             echo "💾 Disk Usage:"
@@ -425,7 +410,6 @@ jobs:
             echo "🎉 Deployment successful!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
             echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
-            echo "⏱️ Total time: ${{ github.event.head_commit.timestamp }}"
           else
             echo "❌ Deployment failed!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
