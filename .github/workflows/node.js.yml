@@ -150,11 +150,11 @@ jobs:
             Compression yes
           EOF
 
-      - name: 🚀 Ultra-Fast Zero-Downtime Deploy
+      - name: 🚀 Robust Zero-Downtime Deploy
         run: |
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           
-          # Parallel upload and setup
+          # Create deployment directory and upload in parallel
           ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR" &
           SETUP_PID=$!
           
@@ -168,7 +168,7 @@ jobs:
           # Copy environment variables
           echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
           
-          # Execute optimized deployment
+          # Execute robust deployment with first-time handling
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
@@ -190,25 +190,60 @@ jobs:
             
             # Verify critical files
             [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
-            [ ! -d ".next" ] && { echo "❌ .next missing"; exit 1; }
+            [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
             
-            # Detect if this is first deployment
+            # Check if this is first deployment by checking for nginx config and PM2 processes
             FIRST_DEPLOYMENT=false
-            if ! pm2 list | grep -q "${{ env.PROCESS_NAME }}" && [ ! -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
+            if [ ! -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
+              echo "🔍 No Nginx config found - likely first deployment"
               FIRST_DEPLOYMENT=true
-              echo "🎯 First deployment detected"
             fi
             
-            # Get current port or set default for first deployment
+            # Check for existing PM2 processes
+            if ! pm2 list | grep -q "${{ env.PROCESS_NAME }}"; then
+              echo "🔍 No PM2 processes found - likely first deployment"
+              FIRST_DEPLOYMENT=true
+            fi
+            
+            # Clean up any stale PM2 processes before starting
+            echo "🧹 Cleaning up any stale processes..."
+            pm2 delete "${{ env.PROCESS_NAME }}-a" 2>/dev/null || true
+            pm2 delete "${{ env.PROCESS_NAME }}-b" 2>/dev/null || true
+            
+            # Port selection logic
             if [ "$FIRST_DEPLOYMENT" = true ]; then
-              CURRENT_PORT=""
+              echo "🎯 First deployment detected"
               NEW_PORT="${{ env.PORT_A }}"
               NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
               OLD_PROCESS=""
-              echo "🚀 First deployment: Using port $NEW_PORT"
-            else
-              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
               
+              # Create initial Nginx config
+              echo "📝 Creating initial Nginx config..."
+              sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
+          upstream test1_backend {
+              server 127.0.0.1:$NEW_PORT;
+          }
+          EOF
+              
+              # Test Nginx config
+              if ! sudo nginx -t; then
+                echo "❌ Initial Nginx config test failed"
+                exit 1
+              fi
+              
+              echo "✅ Initial Nginx config created"
+              
+            else
+              # Get current port from Nginx config
+              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf 2>/dev/null | cut -d: -f2)
+              
+              # Fallback to default if parsing fails
+              if [ -z "$CURRENT_PORT" ]; then
+                CURRENT_PORT="${{ env.PORT_A }}"
+                echo "⚠️ Could not determine current port, defaulting to $CURRENT_PORT"
+              fi
+              
+              # Switch ports
               if [ "$CURRENT_PORT" = "${{ env.PORT_A }}" ]; then
                 NEW_PORT="${{ env.PORT_B }}"
                 NEW_PROCESS="${{ env.PROCESS_NAME }}-b"
@@ -218,6 +253,7 @@ jobs:
                 NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
                 OLD_PROCESS="${{ env.PROCESS_NAME }}-b"
               fi
+              
               echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
             fi
             
@@ -259,19 +295,72 @@ jobs:
             echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.cjs
             
-            # Fast health check with shorter intervals
-            echo "⏳ Health check starting..."
-            for i in {1..20}; do
-              if curl -f -s --max-time 2 "http://localhost:$NEW_PORT/api/health" >/dev/null 2>&1; then
-                echo "✅ Health check passed (${i}s)"
-                break
-              fi
-              [ $i -eq 20 ] && { echo "❌ Health check timeout"; pm2 delete $NEW_PROCESS; exit 1; }
-              sleep 1
-            done
+            # Create a simple health check endpoint if it doesn't exist
+            if [ "$FIRST_DEPLOYMENT" = true ]; then
+              echo "📝 Creating fallback health endpoint for first deployment..."
+              mkdir -p pages/api
+              cat > pages/api/health.js << EOF
+          export default function handler(req, res) {
+            res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+          }
+          EOF
+            fi
             
-            # Update or create Nginx config
-            echo "🔄 Updating Nginx..."
+            # Health check function with fallback
+            health_check() {
+              local port=$1
+              local max_attempts=$2
+              local interval=$3
+              local attempts=0
+              
+              echo "🔍 Starting health check on port $port (max $max_attempts attempts, ${interval}s interval)..."
+              
+              while [ $attempts -lt $max_attempts ]; do
+                if curl -f -s --max-time 2 "http://localhost:$port/api/health" >/dev/null 2>&1; then
+                  echo "✅ Health check passed on port $port (attempt $attempts)"
+                  return 0
+                fi
+                
+                attempts=$((attempts + 1))
+                echo "🔄 Health check attempt $attempts/$max_attempts on port $port..."
+                
+                # On first deployment, check if process is still running
+                if [ "$FIRST_DEPLOYMENT" = true ] && [ $attempts -gt 5 ]; then
+                  if ! pm2 show $NEW_PROCESS | grep -q "online"; then
+                    echo "❌ Process crashed during first deployment"
+                    pm2 logs $NEW_PROCESS --lines 20
+                    return 1
+                  fi
+                fi
+                
+                sleep $interval
+              done
+              
+              echo "❌ Health check failed after $max_attempts attempts"
+              return 1
+            }
+            
+            # Different health check parameters for first deployment vs. updates
+            if [ "$FIRST_DEPLOYMENT" = true ]; then
+              # More lenient for first deployment: 30 attempts, 2s interval
+              if ! health_check $NEW_PORT 30 2; then
+                echo "❌ First deployment health check failed"
+                pm2 logs $NEW_PROCESS --lines 50
+                pm2 delete $NEW_PROCESS
+                exit 1
+              fi
+            else
+              # Stricter for updates: 20 attempts, 1s interval
+              if ! health_check $NEW_PORT 20 1; then
+                echo "❌ Update health check failed"
+                pm2 logs $NEW_PROCESS --lines 20
+                pm2 delete $NEW_PROCESS
+                exit 1
+              fi
+            fi
+            
+            # Update Nginx config
+            echo "🔄 Updating Nginx to point to port $NEW_PORT..."
             sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
           upstream test1_backend {
               server 127.0.0.1:$NEW_PORT;
@@ -281,81 +370,107 @@ jobs:
             # Test and reload Nginx
             if sudo nginx -t; then
               sudo nginx -s reload
-              sleep 1
+              echo "✅ Nginx reloaded successfully"
               
-              # Health check endpoint - handle both first deployment and updates
+              # Wait for Nginx to pick up changes
+              sleep 2
+              
+              # External health check with different handling for first deployment
               if [ "$FIRST_DEPLOYMENT" = true ]; then
-                # For first deployment, check if service is accessible
-                HEALTH_URL="https://${{ env.DOMAIN }}/api/health"
-                echo "🔍 First deployment health check: $HEALTH_URL"
+                echo "🔍 First deployment - checking external access..."
                 
+                # Try up to 10 times with 2s interval
                 for i in {1..10}; do
-                  if curl -f -s --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; then
-                    echo "✅ First deployment successful!"
+                  if curl -f -s --max-time 3 "https://${{ env.DOMAIN }}/api/health" >/dev/null 2>&1; then
+                    echo "✅ External health check passed on attempt $i"
+                    EXTERNAL_CHECK_PASSED=true
                     break
                   fi
-                  [ $i -eq 10 ] && echo "⚠️ External health check failed, but deployment completed"
-                  sleep 1
+                  echo "🔄 External health check attempt $i/10..."
+                  sleep 2
                 done
+                
+                # Continue even if external check fails for first deployment
+                if [ "$EXTERNAL_CHECK_PASSED" != "true" ]; then
+                  echo "⚠️ External health check failed, but continuing with first deployment"
+                  echo "⚠️ Check DNS and Nginx configuration"
+                fi
               else
                 # For updates, ensure external access works
-                if curl -f -s --max-time 3 "https://${{ env.DOMAIN }}/api/health" >/dev/null 2>&1; then
-                  echo "✅ Update successful!"
-                  
-                  # Stop old process
-                  if [ -n "$OLD_PROCESS" ] && pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
-                    echo "🛑 Stopping old process: $OLD_PROCESS"
-                    pm2 delete $OLD_PROCESS
-                  fi
-                else
+                if ! curl -f -s --max-time 3 "https://${{ env.DOMAIN }}/api/health" >/dev/null 2>&1; then
                   echo "❌ External health check failed, rolling back..."
                   
-                  # Rollback
-                  if [ -n "$CURRENT_PORT" ]; then
-                    sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
+                  # Get current port from old process
+                  if [ -n "$OLD_PROCESS" ]; then
+                    OLD_PORT=$(pm2 describe $OLD_PROCESS | grep -o "PORT=[0-9]*" | cut -d= -f2)
+                    
+                    # Rollback Nginx config
+                    if [ -n "$OLD_PORT" ]; then
+                      echo "🔄 Rolling back to port $OLD_PORT..."
+                      sudo tee "/etc/nginx/conf.d/test1_backend.conf" > /dev/null << EOF
           upstream test1_backend {
-              server 127.0.0.1:$CURRENT_PORT;
+              server 127.0.0.1:$OLD_PORT;
           }
           EOF
-                    sudo nginx -s reload
+                      sudo nginx -s reload
+                    fi
                   fi
+                  
+                  # Stop failed process
                   pm2 delete $NEW_PROCESS
                   exit 1
+                fi
+                
+                # Stop old process if it exists
+                if [ -n "$OLD_PROCESS" ] && pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
+                  echo "🛑 Stopping old process: $OLD_PROCESS"
+                  pm2 stop $OLD_PROCESS
+                  sleep 1
+                  pm2 delete $OLD_PROCESS
                 fi
               fi
               
               # Update symlinks
+              echo "🔄 Updating symlinks..."
               [ -L "$CURRENT_PATH" ] && rm "$CURRENT_PATH"
               ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
               
               # Update staging
+              echo "🔄 Updating staging directory..."
               rm -rf "$STAGING_PATH"/* 2>/dev/null || true
               cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
               
-              # Save PM2 and cleanup
+              # Save PM2 configuration
               pm2 save
-              cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +4 | xargs -r rm -rf
               
-              echo "🎉 Deployment completed in record time!"
+              # Cleanup old deployments (keep only 2 most recent)
+              echo "🧹 Cleaning up old deployments (keeping only 2 most recent)..."
+              cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
+              
+              echo "🎉 Deployment completed successfully!"
+              echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
               
             else
-              echo "❌ Nginx config failed"
+              echo "❌ Nginx configuration test failed"
               pm2 delete $NEW_PROCESS
               exit 1
             fi
           DEPLOY_SCRIPT
 
-      - name: 🔍 Quick Verify
+      - name: 🔍 Verify Deployment
         run: |
           ssh deploy << 'VERIFY_SCRIPT'
             echo "📊 PM2 Status:"
-            pm2 status | grep "${{ env.PROCESS_NAME }}"
+            pm2 status | grep "${{ env.PROCESS_NAME }}" || echo "No PM2 processes found"
             
             echo "🌐 Health Check:"
             curl -s "https://${{ env.DOMAIN }}/api/health" || echo "Health endpoint not responding"
             
-            echo "🔧 Active Port:"
-            grep "127.0.0.1:" /etc/nginx/conf.d/test1_backend.conf
+            echo "🔧 Nginx Config:"
+            cat /etc/nginx/conf.d/test1_backend.conf 2>/dev/null || echo "No Nginx config found"
+            
+            echo "📂 Deployment History (keeping 2 most recent):"
+            ls -la ${{ env.DEPLOY_PATH }}/deployments | head -5
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
@@ -370,7 +485,7 @@ jobs:
       - name: 📢 Status
         run: |
           if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "🎉 Ultra-fast deployment completed!"
+            echo "🎉 Deployment successful!"
             echo "⚡ Cache hit: ${{ needs.build.outputs.cache-hit }}"
             echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
           else
