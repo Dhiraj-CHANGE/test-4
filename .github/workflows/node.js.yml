@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v3'  # Bumped version
+  CACHE_VERSION: 'v2'  # Bumped version to invalidate old cache
 
 jobs:
   build:
@@ -14,15 +14,7 @@ jobs:
     outputs:
       deployment-id: ${{ steps.meta.outputs.deployment-id }}
       cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
-      branch: ${{ steps.branch.outputs.branch }}
     steps:
-      - name: 📋 Get Branch Name
-        id: branch
-        run: |
-          BRANCH=${GITHUB_REF##*/}
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "🌿 Branch: $BRANCH"
-
       - name: 📋 Checkout
         uses: actions/checkout@v4
         with:
@@ -41,38 +33,36 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Parallel caching for faster execution
-      - name: 🔄 Cache Dependencies
+      - name: 🔄 Cache Dependencies Only
         id: cache-deps
         uses: actions/cache@v3
         with:
           path: node_modules
           key: ${{ env.CACHE_VERSION }}-deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ env.CACHE_VERSION }}-deps-${{ runner.os }}-
 
       - name: 🔄 Cache Build Output
         id: cache-check
         uses: actions/cache@v3
         with:
           path: .next
-          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ steps.branch.outputs.branch }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('{app,components,lib,pages,public,styles}/**/*.{js,jsx,ts,tsx,json,css}', '*.{js,jsx,ts,tsx,json}', '!node_modules/**') }}
+          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}
+          restore-keys: |
+            ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
 
-      # Fast install with optimizations
       - name: 🚀 Install Dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
-          echo "📦 Installing dependencies..."
-          npm ci --prefer-offline --no-audit --no-fund --silent --progress=false --no-optional
+          npm ci --prefer-offline --no-audit --no-fund --silent --progress=false
           echo "📦 Dependencies installed"
 
-      # Always build if cache miss or source code changed
       - name: 🏗️ Build Application
         if: steps.cache-check.outputs.cache-hit != 'true'
         run: |
-          echo "🏗️ Building application..."
           NODE_ENV=production npm run build
           echo "✅ Build completed"
 
-      # Optimize package creation with parallel compression
       - name: 📦 Create Optimized Package
         run: |
           echo "📦 Creating optimized package..."
@@ -88,32 +78,17 @@ jobs:
           echo "  - .next size: $(du -sh .next | cut -f1)"
           echo "  - node_modules size: $(du -sh node_modules | cut -f1)"
           
-          # Use pigz for parallel compression if available
-          if command -v pigz > /dev/null; then
-            tar --use-compress-program=pigz -cf deployment.tar.gz \
-              --exclude='node_modules/.cache' \
-              --exclude='node_modules/*/test*' \
-              --exclude='node_modules/*/docs' \
-              --exclude='node_modules/*/*.md' \
-              --exclude='.next/cache' \
-              .next \
-              node_modules \
-              public \
-              package.json \
-              next.config.*
-          else
-            tar -czf deployment.tar.gz \
-              --exclude='node_modules/.cache' \
-              --exclude='node_modules/*/test*' \
-              --exclude='node_modules/*/docs' \
-              --exclude='node_modules/*/*.md' \
-              --exclude='.next/cache' \
-              .next \
-              node_modules \
-              public \
-              package.json \
-              next.config.*
-          fi
+          tar -czf deployment.tar.gz \
+            --exclude='node_modules/.cache' \
+            --exclude='node_modules/*/test*' \
+            --exclude='node_modules/*/docs' \
+            --exclude='node_modules/*/*.md' \
+            --exclude='.next/cache' \
+            .next \
+            node_modules \
+            public \
+            package.json \
+            next.config.*
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
 
       - name: 🚀 Upload Artifact
@@ -122,7 +97,7 @@ jobs:
           name: app-${{ steps.meta.outputs.deployment-id }}
           path: deployment.tar.gz
           retention-days: 1
-          compression-level: 0  # Skip recompression since we already compressed
+          compression-level: 1
 
   deploy:
     needs: build
@@ -138,8 +113,7 @@ jobs:
       - name: ⚙️ Setup Environment Variables
         id: env-setup
         run: |
-          BRANCH="${{ needs.build.outputs.branch }}"
-          echo "🌿 Branch: $BRANCH"
+          BRANCH=${GITHUB_REF##*/}
           
           if [ "$BRANCH" = "main" ]; then
             # Production environment
@@ -153,7 +127,7 @@ jobs:
             DOMAIN="${{ secrets.PROD_DOMAIN }}"
             ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            NGINX_CONF="test1_backend.conf"
+            NGINX_CONF=""$NGINX_CONF".conf"
           else
             # Development environment
             SERVER="${{ secrets.DEV_DOMAIN }}"
@@ -199,8 +173,6 @@ jobs:
           echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
           echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
           echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
-          echo "nginx-conf=$NGINX_CONF" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           
           # Set environment variables for this job
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
@@ -211,8 +183,7 @@ jobs:
           echo "PROCESS_NAME=$PROCESS_NAME" >> $GITHUB_ENV
           echo "PORT_A=$PORT_A" >> $GITHUB_ENV
           echo "PORT_B=$PORT_B" >> $GITHUB_ENV
-          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
-          echo "NGINX_CONF=$NGINX_CONF" >> $GITHUB_ENV
+          echo "domain=$DOMAIN" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH Configuration
         run: |
@@ -221,7 +192,7 @@ jobs:
           chmod 700 ~/.ssh
           
           # Determine which SSH key to use based on branch
-          BRANCH="${{ needs.build.outputs.branch }}"
+          BRANCH=${GITHUB_REF##*/}
           if [ "$BRANCH" = "main" ]; then
             SSH_KEY='${{ secrets.PROD_SSH_PRIVATE_KEY }}'
           else
@@ -255,10 +226,6 @@ jobs:
             ServerAliveInterval 30
             ConnectTimeout 10
             Compression yes
-            TCPKeepAlive yes
-            ControlMaster auto
-            ControlPath ~/.ssh/control-%r@%h:%p
-            ControlPersist 10m
           EOF
           
           # Verify SSH config
@@ -282,25 +249,23 @@ jobs:
       - name: 🚀 Deploy Application
         run: |
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
-          BRANCH="${{ steps.env-setup.outputs.branch }}"
-          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
           
           echo "📤 Creating deployment directory: $DEPLOY_DIR"
           ssh deploy "mkdir -p ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR"
           
           echo "📤 Uploading deployment package..."
-          # Use compression and multiplexing for faster transfer
-          scp -C -o 'ControlPath=~/.ssh/control-%r@%h:%p' deployment.tar.gz deploy:${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/deployment.tar.gz
+          scp -C deployment.tar.gz deploy:${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/deployment.tar.gz
           
           # Copy environment variables based on branch
+          BRANCH=${GITHUB_REF##*/}
           if [ "$BRANCH" = "main" ]; then
             echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
           else
             echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
           fi
           
-          # Execute deployment script with branch-specific Nginx config
-          ssh deploy << DEPLOY_SCRIPT
+          # Execute deployment script
+          ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
             # Setup paths
@@ -309,28 +274,20 @@ jobs:
             NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
             CURRENT_PATH="$DEPLOY_PATH/current"
             STAGING_PATH="$DEPLOY_PATH/staging"
-            NGINX_CONF="${NGINX_CONF}"
-            BRANCH="${BRANCH}"
             
             echo "🏗️ Setting up deployment paths..."
             echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
             echo "📂 Current: $CURRENT_PATH"
             echo "📂 Staging: $STAGING_PATH"
-            echo "🌿 Branch: $BRANCH"
-            echo "🔧 Nginx config: $NGINX_CONF"
             
             # Create directories
             mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
             
             cd "$NEW_DEPLOYMENT_PATH"
             
-            # Extract package with parallel decompression if available
+            # Extract package
             echo "📦 Extracting package..."
-            if command -v pigz > /dev/null; then
-              tar --use-compress-program=pigz -xf deployment.tar.gz && rm deployment.tar.gz
-            else
-              tar -xzf deployment.tar.gz && rm deployment.tar.gz
-            fi
+            tar -xzf deployment.tar.gz && rm deployment.tar.gz
             
             # Verify critical files
             [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
@@ -355,8 +312,8 @@ jobs:
             else
               echo "🔄 Found existing processes - Regular update"
               # Get current port from Nginx config
-              if [ -f "/etc/nginx/conf.d/$NGINX_CONF" ]; then
-                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$NGINX_CONF | cut -d: -f2)
+              if [ -f "/etc/nginx/conf.d/"$NGINX_CONF".conf" ]; then
+                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/"$NGINX_CONF".conf | cut -d: -f2)
                 echo "📍 Current Nginx port: $CURRENT_PORT"
               fi
             fi
@@ -420,7 +377,7 @@ jobs:
             echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.cjs
             
-            # Health check function with faster timeouts
+            # Health check function
             health_check() {
               local port=$1
               local max_attempts=$2
@@ -429,7 +386,7 @@ jobs:
               echo "🔍 Health check on port $port (max $max_attempts attempts)..."
               
               for i in $(seq 1 $max_attempts); do
-                if curl -f -s --max-time 1 "http://localhost:$port/api/health" >/dev/null 2>&1; then
+                if curl -f -s --max-time 2 "http://localhost:$port/api/health" >/dev/null 2>&1; then
                   echo "✅ Health check passed on port $port (attempt $i)"
                   return 0
                 fi
@@ -441,10 +398,10 @@ jobs:
               return 1
             }
             
-            # Local health check with optimized parameters
+            # Local health check
             if [ "$FIRST_DEPLOYMENT" = true ]; then
               # More lenient for first deployment
-              if ! health_check $NEW_PORT 20 1; then
+              if ! health_check $NEW_PORT 30 2; then
                 echo "❌ First deployment health check failed"
                 pm2 logs $NEW_PROCESS --lines 50
                 pm2 delete $NEW_PROCESS
@@ -452,7 +409,7 @@ jobs:
               fi
             else
               # Standard for updates
-              if ! health_check $NEW_PORT 15 0.5; then
+              if ! health_check $NEW_PORT 20 1; then
                 echo "❌ Update health check failed"
                 pm2 logs $NEW_PROCESS --lines 20
                 pm2 delete $NEW_PROCESS
@@ -460,10 +417,10 @@ jobs:
               fi
             fi
             
-            # Update Nginx config - branch specific
-            echo "🔄 Updating Nginx config $NGINX_CONF to point to port $NEW_PORT..."
-            sudo tee "/etc/nginx/conf.d/$NGINX_CONF" > /dev/null << EOF
-          upstream test1_backend {
+            # Update Nginx config
+            echo "🔄 Updating Nginx to point to port $NEW_PORT..."
+            sudo tee "/etc/nginx/conf.d/"$NGINX_CONF".conf" > /dev/null << EOF
+          upstream "$NGINX_CONF" {
               server 127.0.0.1:$NEW_PORT;
           }
           EOF
@@ -472,7 +429,7 @@ jobs:
             if sudo nginx -t; then
               sudo nginx -s reload
               echo "✅ Nginx reloaded successfully"
-              sleep 1
+              sleep 3
               
               # Always proceed with deployment since local health check passed
               echo "✅ Local health check passed, proceeding with deployment"
@@ -482,25 +439,21 @@ jobs:
                 if pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
                   echo "🛑 Stopping old process: $OLD_PROCESS"
                   pm2 stop $OLD_PROCESS
+                  sleep 1
                   pm2 delete $OLD_PROCESS
                 else
                   echo "ℹ️ Old process $OLD_PROCESS not found (already stopped)"
                 fi
               fi
               
-              # Update symlinks and staging in parallel
-              echo "🔄 Updating symlinks and staging..."
-              {
-                [ -L "$CURRENT_PATH" ] && rm "$CURRENT_PATH"
-                ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
-              } &
+              # Update symlinks and staging
+              echo "🔄 Updating symlinks..."
+              [ -L "$CURRENT_PATH" ] && rm "$CURRENT_PATH"
+              ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
               
-              {
-                rm -rf "$STAGING_PATH"/* 2>/dev/null || true
-                cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
-              } &
-              
-              wait
+              echo "🔄 Updating staging directory..."
+              rm -rf "$STAGING_PATH"/* 2>/dev/null || true
+              cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
               
               # Save PM2 and cleanup
               pm2 save
@@ -522,16 +475,13 @@ jobs:
 
       - name: 🔍 Verify Deployment
         run: |
-          BRANCH="${{ steps.env-setup.outputs.branch }}"
-          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
-          
-          ssh deploy << VERIFY_SCRIPT
+          ssh deploy << 'VERIFY_SCRIPT'
             echo "📊 PM2 Status:"
             pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
             
             echo ""
-            echo "🔧 Nginx Config ($NGINX_CONF):"
-            cat /etc/nginx/conf.d/$NGINX_CONF 2>/dev/null || echo "No Nginx config"
+            echo "🔧 Nginx Config:"
+            cat /etc/nginx/conf.d/"$NGINX_CONF".conf 2>/dev/null || echo "No Nginx config"
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
@@ -552,9 +502,7 @@ jobs:
 
       - name: 🧹 Cleanup
         if: always()
-        run: |
-          rm -f ~/.ssh/deploy_key deployment.tar.gz
-          ssh -O exit deploy 2>/dev/null || true
+        run: rm -f ~/.ssh/deploy_key deployment.tar.gz
 
   notify:
     needs: [build, deploy]
@@ -567,7 +515,6 @@ jobs:
             echo "🎉 Deployment successful!"
             echo "⚡ Cache hit: ${{ needs.build.outputs.cache-hit }}"
             echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
-            echo "🕒 Total time: ~$(( $(date +%s) - $(date -d "$(echo $GITHUB_EVENT_PATH | jq -r '.event.head_commit.timestamp')" +%s) )) seconds"
           else
             echo "❌ Deployment failed!"
           fi
