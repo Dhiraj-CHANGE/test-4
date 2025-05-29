@@ -47,7 +47,6 @@ jobs:
       - name: 🔧 Install Dependencies
         run: |
           if [ ! -d "node_modules" ] || [ "$(find node_modules -maxdepth 0 -empty 2>/dev/null)" ]; then
-            echo "📦 Installing dependencies..."
             npm ci --prefer-offline --no-audit --progress=false
           else
             echo "📦 Using cached dependencies"
@@ -56,12 +55,9 @@ jobs:
       - name: 🏗️ Build Application
         run: |
           npm run build
-          echo "✅ Build completed"
-
       - name: 📦 Create Deployment Package
         run: |
           # Create comprehensive deployment package
-          echo "📦 Creating deployment package..."
           
           # Include all necessary files and directories
           tar -czf deployment.tar.gz \
@@ -110,6 +106,8 @@ jobs:
             echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME}}" >> $GITHUB_ENV
+            echo "PORT_A=${{ secrets.PROD_PORT_A}}" >> $GITHUB_ENV
+            echo "PORT_B=${{ secrets.PROD_PORT_B}}" >> $GITHUB_ENV
             echo "ENVIRONMENT=production" >> $GITHUB_ENV
           else
             echo "DEPLOY_PATH=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
@@ -117,6 +115,8 @@ jobs:
             echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME}}" >> $GITHUB_ENV
+            echo "PORT_A=${{ secrets.DEV_PORT_A}}" >> $GITHUB_ENV
+            echo "PORT_B=${{ secrets.DEV_PORT_B}}" >> $GITHUB_ENV
             echo "ENVIRONMENT=development" >> $GITHUB_ENV
           fi
           
@@ -167,18 +167,12 @@ jobs:
             BACKUP_PATH="$DEPLOY_PATH/backup"
             STAGING_PATH="$DEPLOY_PATH/staging"
             
-            echo "🏗️ Setting up deployment paths..."
-            echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
-            echo "📂 Current: $CURRENT_PATH"
-            echo "📂 Staging: $STAGING_PATH"
-            
             # Create necessary directories
             mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$BACKUP_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
             
             cd "$NEW_DEPLOYMENT_PATH"
             
             # Extract deployment package
-            echo "📦 Extracting deployment package..."
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
             
@@ -196,38 +190,31 @@ jobs:
               exit 1
             fi
             
-            echo "✅ Files extracted successfully"
-            
             # Check current Nginx upstream port
             CURRENT_PORT=""
             if [ -f "/etc/nginx/conf.d/test1_backend.conf" ]; then
               CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/test1_backend.conf | cut -d: -f2)
             fi
             
-            # Default to 5005 if no port found
+            # Default to ${{ env.PORT_A }} if no port found
             if [ -z "$CURRENT_PORT" ]; then
-              CURRENT_PORT="5005"
+              CURRENT_PORT="${{ env.PORT_A }}"
             fi
             
-            # Determine new port (switch between 5005 and 5006)
-            if [ "$CURRENT_PORT" = "5005" ]; then
-              NEW_PORT="5006"
+            # Determine new port (switch between ${{ env.PORT_A }} and ${{ env.PORT_B }})
+            if [ "$CURRENT_PORT" = "${{ env.PORT_A }}" ]; then
+              NEW_PORT="${{ env.PORT_B }}"
               NEW_PROCESS="${{ env.PROCESS_NAME }}-b"
               OLD_PROCESS="${{ env.PROCESS_NAME }}-a"
             else
-              NEW_PORT="5005"
+              NEW_PORT="${{ env.PORT_A }}"
               NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
               OLD_PROCESS="${{ env.PROCESS_NAME }}-b"
             fi
             
-            echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
-            echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
-            
             # Install/verify dependencies
-            echo "📦 Verifying dependencies..."
             
             if [ ! -d "node_modules" ] || [ ! -f "node_modules/.bin/next" ]; then
-              echo "📦 Installing dependencies..."
               npm ci --production=false --prefer-offline=false --no-audit --no-fund
             else
               echo "✅ Dependencies already present"
@@ -238,8 +225,6 @@ jobs:
               echo "❌ Next.js binary not found"
               exit 1
             fi
-            
-            echo "✅ Dependencies verified"
             
             # Add environment variables
             echo "PORT=$NEW_PORT" >> .env
@@ -279,7 +264,6 @@ jobs:
           EOF
             
             # Start new process
-            echo "🚀 Starting new process $NEW_PROCESS on port $NEW_PORT..."
             pm2 start ecosystem.config.cjs
             
             # Health check function
@@ -288,11 +272,8 @@ jobs:
               local attempts=0
               local max_attempts=30
               
-              echo "🔍 Starting health check on port $port..."
-              
               while [ $attempts -lt $max_attempts ]; do
                 if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
-                  echo "✅ Health check passed on port $port"
                   return 0
                 fi
                 attempts=$((attempts + 1))
@@ -309,7 +290,6 @@ jobs:
             sleep 10
             
             if health_check $NEW_PORT; then
-              echo "✅ New process is healthy on port $NEW_PORT"
               
               # Update Nginx upstream
               echo "🔄 Updating Nginx to point to port $NEW_PORT..."
@@ -323,14 +303,12 @@ jobs:
               # Test and reload Nginx
               if sudo nginx -t; then
                 sudo nginx -s reload
-                echo "✅ Nginx reloaded successfully"
                 
                 # Wait for Nginx to pick up changes
                 sleep 3
                 
                 # Verify the switch worked
-                if curl -f -s --max-time 5 "https://test1.api.change-networks.com/api/health" > /dev/null 2>&1; then
-                  echo "✅ Traffic successfully switched to new version"
+                if curl -f -s --max-time 5 "https://$SERVER/api/health" > /dev/null 2>&1; then
                   
                   # Stop old process if it exists
                   if pm2 describe $OLD_PROCESS > /dev/null 2>&1; then
@@ -357,7 +335,6 @@ jobs:
                   ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
                   
                   # Copy deployment to staging for reference (not move!)
-                  echo "📋 Updating staging directory..."
                   rm -rf "$STAGING_PATH"/*
                   cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
                   
@@ -365,14 +342,8 @@ jobs:
                   pm2 save
                   
                   # Cleanup old deployments (keep last 3)
-                  echo "🧹 Cleaning up old deployments..."
                   cd "$DEPLOY_PATH/deployments"
                   ls -t | tail -n +4 | xargs -r rm -rf
-                  
-                  echo "🎉 Zero-downtime deployment completed successfully!"
-                  echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
-                  echo "📂 Current deployment: $NEW_DEPLOYMENT_PATH"
-                  echo "📂 Staging contains: $(ls -la $STAGING_PATH | wc -l) items"
                   
                 else
                   echo "❌ External health check failed after Nginx switch"
@@ -417,7 +388,7 @@ jobs:
             
             echo ""
             echo "🌐 External Health Check:"
-            curl -s https://test1.api.change-networks.com/api/health
+            curl -s https://$SERVER/api/health
             
             echo ""
             echo "🔧 Nginx Upstream Config:"
@@ -425,7 +396,7 @@ jobs:
             
             echo ""
             echo "📋 Active Processes:"
-            netstat -tuln | grep -E ':(5005|5006) '
+            netstat -tuln | grep -E ":(${{ env.PORT_A }}|${{ env.PORT_B }}) "
             
             echo ""
             echo "🔗 Current Directory (symlink):"
@@ -458,10 +429,7 @@ jobs:
       - name: 📢 Deployment Status
         run: |
           if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "🎉 Test1 API deployment successful!"
-            echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
             echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
-            echo "🔗 URL: https://test1.api.change-networks.com"
           else
             echo "❌ Test1 API deployment failed!"
             echo "🆔 ID: ${{ needs.build.outputs.deployment-id }}"
