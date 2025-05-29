@@ -144,7 +144,7 @@ jobs:
           fi
           
           # Set outputs for use in later steps
-          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          echo "server=$DOMAIN" >> $GITHUB_OUTPUT
           echo "user=$USER" >> $GITHUB_OUTPUT
           echo "port=$PORT_SSH" >> $GITHUB_OUTPUT
           echo "deploy-path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
@@ -155,7 +155,7 @@ jobs:
           
           # Set environment variables for this job
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
-          echo "SERVER=$SERVER" >> $GITHUB_ENV
+          echo "SERVER=$DOMAIN" >> $GITHUB_ENV
           echo "USER=$USER" >> $GITHUB_ENV
           echo "PORT_SSH=$PORT_SSH" >> $GITHUB_ENV
           echo "DEPLOY_PATH=$DEPLOY_PATH" >> $GITHUB_ENV
