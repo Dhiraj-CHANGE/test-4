@@ -92,34 +92,77 @@ jobs:
           path: .
 
       - name: ⚙️ Setup Environment Variables
+        id: env-setup
         run: |
           BRANCH=${GITHUB_REF##*/}
           
           if [ "$BRANCH" = "main" ]; then
-            echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
-            echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
-            echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME}}" >> $GITHUB_ENV
-            echo "PORT_A=${{ secrets.PROD_PORT_A}}" >> $GITHUB_ENV
-            echo "PORT_B=${{ secrets.PROD_PORT_B}}" >> $GITHUB_ENV
-            echo "DOMAIN=${{ secrets.PROD_DOMAIN}}" >> $GITHUB_ENV
-            echo "ENV_SECRET_NAME=PROD_ENV_SECRET" >> $GITHUB_ENV
-            echo "SSH_KEY_SECRET_NAME=PROD_SSH_PRIVATE_KEY" >> $GITHUB_ENV
+            # Production environment
+            SERVER="${{ secrets.PROD_SERVER_HOST }}"
+            USER="${{ secrets.PROD_SERVER_USER }}"
+            PORT_SSH="${{ secrets.PROD_SSH_PORT }}"
+            DEPLOY_PATH="${{ secrets.PROD_SERVER_PATH }}"
+            PROCESS_NAME="${{ secrets.PROD_PROCESS_NAME }}"
+            PORT_A="${{ secrets.PROD_PORT_A }}"
+            PORT_B="${{ secrets.PROD_PORT_B }}"
+            DOMAIN="${{ secrets.PROD_DOMAIN }}"
+            ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
+            SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
           else
-            echo "DEPLOY_PATH=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
-            echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
-            echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
-            echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
-            echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME}}" >> $GITHUB_ENV
-            echo "PORT_A=${{ secrets.DEV_PORT_A}}" >> $GITHUB_ENV
-            echo "PORT_B=${{ secrets.DEV_PORT_B}}" >> $GITHUB_ENV
-            echo "DOMAIN=${{ secrets.DEV_DOMAIN}}" >> $GITHUB_ENV
-            echo "ENV_SECRET_NAME=DEV_ENV_SECRET" >> $GITHUB_ENV
-            echo "SSH_KEY_SECRET_NAME=DEV_SSH_PRIVATE_KEY" >> $GITHUB_ENV
+            # Development environment
+            SERVER="${{ secrets.DEV_SERVER_HOST }}"
+            USER="${{ secrets.DEV_SERVER_USER }}"
+            PORT_SSH="${{ secrets.DEV_SSH_PORT }}"
+            DEPLOY_PATH="${{ secrets.DEV_SERVER_PATH }}"
+            PROCESS_NAME="${{ secrets.DEV_PROCESS_NAME }}"
+            PORT_A="${{ secrets.DEV_PORT_A }}"
+            PORT_B="${{ secrets.DEV_PORT_B }}"
+            DOMAIN="${{ secrets.DEV_DOMAIN }}"
+            ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
+            SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
           fi
           
+          # Validate required variables
+          if [ -z "$SERVER" ]; then
+            echo "❌ SERVER is not set. Please add SERVER_HOST to your repository secrets."
+            exit 1
+          fi
+          
+          if [ -z "$USER" ]; then
+            echo "❌ USER is not set. Please add SERVER_USER to your repository secrets."
+            exit 1
+          fi
+          
+          if [ -z "$PORT_SSH" ]; then
+            echo "⚠️ PORT_SSH is not set, defaulting to 22"
+            PORT_SSH="22"
+          fi
+          
+          if [ -z "$SSH_KEY" ]; then
+            echo "❌ SSH_KEY is not set. Please add SSH_PRIVATE_KEY to your repository secrets."
+            exit 1
+          fi
+          
+          # Set outputs for use in later steps
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          echo "user=$USER" >> $GITHUB_OUTPUT
+          echo "port=$PORT_SSH" >> $GITHUB_OUTPUT
+          echo "deploy-path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
+          echo "process-name=$PROCESS_NAME" >> $GITHUB_OUTPUT
+          echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
+          echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+          
+          # Set environment variables for this job
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
+          echo "SERVER=$SERVER" >> $GITHUB_ENV
+          echo "USER=$USER" >> $GITHUB_ENV
+          echo "PORT_SSH=$PORT_SSH" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=$DEPLOY_PATH" >> $GITHUB_ENV
+          echo "PROCESS_NAME=$PROCESS_NAME" >> $GITHUB_ENV
+          echo "PORT_A=$PORT_A" >> $GITHUB_ENV
+          echo "PORT_B=$PORT_B" >> $GITHUB_ENV
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH Configuration
         run: |
@@ -145,12 +188,18 @@ jobs:
             exit 1
           fi
           
-          # Create SSH config
+          # Validate server hostname
+          if [ -z "${{ steps.env-setup.outputs.server }}" ]; then
+            echo "❌ Server hostname is empty. Please check your repository secrets."
+            exit 1
+          fi
+          
+          # Create SSH config with validated hostname
           cat > ~/.ssh/config << EOF
           Host deploy
-            HostName ${{ env.SERVER }}
-            User ${{ env.USER }}
-            Port ${{ env.PORT_SSH }}
+            HostName ${{ steps.env-setup.outputs.server }}
+            User ${{ steps.env-setup.outputs.user }}
+            Port ${{ steps.env-setup.outputs.port }}
             IdentityFile ~/.ssh/deploy_key
             StrictHostKeyChecking no
             ServerAliveInterval 30
@@ -163,7 +212,7 @@ jobs:
           cat ~/.ssh/config
           
           # Test SSH connection
-          echo "🔍 Testing SSH connection..."
+          echo "🔍 Testing SSH connection to ${{ steps.env-setup.outputs.server }}..."
           if ssh -o BatchMode=yes -o ConnectTimeout=10 deploy "echo 'SSH connection successful'"; then
             echo "✅ SSH connection test passed"
           else
@@ -174,24 +223,24 @@ jobs:
       - name: 🧹 Clean Old Deployments First
         run: |
           echo "🧹 Cleaning old deployments (keeping only 2 most recent)..."
-          ssh deploy "cd ${{ env.DEPLOY_PATH }}/deployments 2>/dev/null && ls -t | tail -n +3 | xargs -r rm -rf || echo 'No old deployments to clean'"
+          ssh deploy "cd ${{ steps.env-setup.outputs.deploy-path }}/deployments 2>/dev/null && ls -t | tail -n +3 | xargs -r rm -rf || echo 'No old deployments to clean'"
 
       - name: 🚀 Deploy Application
         run: |
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           
           echo "📤 Creating deployment directory: $DEPLOY_DIR"
-          ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR"
+          ssh deploy "mkdir -p ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR"
           
           echo "📤 Uploading deployment package..."
-          scp -C deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/deployment.tar.gz
+          scp -C deployment.tar.gz deploy:${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/deployment.tar.gz
           
           # Copy environment variables based on branch
           BRANCH=${GITHUB_REF##*/}
           if [ "$BRANCH" = "main" ]; then
-            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
+            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
           else
-            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
+            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
           fi
           
           # Execute deployment script
@@ -199,7 +248,7 @@ jobs:
             set -e
             
             # Setup paths
-            DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
+            DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
             DEPLOYMENT_ID="${{ env.DEPLOYMENT_ID }}"
             NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
             CURRENT_PATH="$DEPLOY_PATH/current"
@@ -231,7 +280,7 @@ jobs:
             CURRENT_PORT=""
             
             # Check for existing processes with our process name pattern
-            EXISTING_PROCESSES=$(pm2 list | grep "${{ env.PROCESS_NAME }}" | grep "online" || true)
+            EXISTING_PROCESSES=$(pm2 list | grep "${{ steps.env-setup.outputs.process-name }}" | grep "online" || true)
             
             if [ -z "$EXISTING_PROCESSES" ]; then
               echo "🎯 No running processes found - First deployment or recovery"
@@ -247,20 +296,20 @@ jobs:
             
             # Determine ports and processes
             if [ "$FIRST_DEPLOYMENT" = true ]; then
-              NEW_PORT="${{ env.PORT_A }}"
-              NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
+              NEW_PORT="${{ steps.env-setup.outputs.port-a }}"
+              NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
               OLD_PROCESS=""
               echo "🚀 First deployment: Using port $NEW_PORT with process $NEW_PROCESS"
             else
               # Switch ports for zero-downtime
-              if [ "$CURRENT_PORT" = "${{ env.PORT_A }}" ]; then
-                NEW_PORT="${{ env.PORT_B }}"
-                NEW_PROCESS="${{ env.PROCESS_NAME }}-b"
-                OLD_PROCESS="${{ env.PROCESS_NAME }}-a"
+              if [ "$CURRENT_PORT" = "${{ steps.env-setup.outputs.port-a }}" ]; then
+                NEW_PORT="${{ steps.env-setup.outputs.port-b }}"
+                NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-b"
+                OLD_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
               else
-                NEW_PORT="${{ env.PORT_A }}"
-                NEW_PROCESS="${{ env.PROCESS_NAME }}-a"
-                OLD_PROCESS="${{ env.PROCESS_NAME }}-b"
+                NEW_PORT="${{ steps.env-setup.outputs.port-a }}"
+                NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
+                OLD_PROCESS="${{ steps.env-setup.outputs.process-name }}-b"
               fi
               echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
               echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
@@ -404,7 +453,7 @@ jobs:
         run: |
           ssh deploy << 'VERIFY_SCRIPT'
             echo "📊 PM2 Status:"
-            pm2 status | grep "${{ env.PROCESS_NAME }}" || echo "No processes found"
+            pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
             
             echo ""
             echo "🔧 Nginx Config:"
@@ -412,19 +461,19 @@ jobs:
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
-            ls -la ${{ env.DEPLOY_PATH }}/deployments
+            ls -la ${{ steps.env-setup.outputs.deploy-path }}/deployments
             
             echo ""
             echo "📂 Current Symlink:"
-            ls -la ${{ env.DEPLOY_PATH }}/current
+            ls -la ${{ steps.env-setup.outputs.deploy-path }}/current
             
             echo ""
             echo "📂 Staging Directory:"
-            ls -la ${{ env.DEPLOY_PATH }}/staging
+            ls -la ${{ steps.env-setup.outputs.deploy-path }}/staging
             
             echo ""
             echo "🌐 Health Check Test:"
-            curl -s "https://${{ env.DOMAIN }}/api/health" || echo "External health check failed"
+            curl -s "https://${{ steps.env-setup.outputs.domain }}/api/health" || echo "External health check failed"
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
