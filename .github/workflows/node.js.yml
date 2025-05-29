@@ -60,32 +60,33 @@ jobs:
 
       - name: 📦 Create Deployment Package
         run: |
-          # Detect project structure
-          if [ -d "app" ]; then
-            echo "📂 App Router detected"
-            ROUTER_TYPE="app"
-            tar -czf deployment.tar.gz .next app node_modules public package.json package-lock.json next.config.*
-          elif [ -d "pages" ]; then
-            echo "📂 Pages Router detected"
-            ROUTER_TYPE="pages"
-            tar -czf deployment.tar.gz .next pages styles eslint.config.mjs postcss.config.mjs tsconfig.json node_modules public package.json package-lock.json next.config.*
-          else
-            echo "📂 Basic Next.js setup detected"
-            ROUTER_TYPE="basic"
-            tar -czf deployment.tar.gz .next public node_modules package.json package-lock.json next.config.*
-          fi
+          # Create comprehensive deployment package
+          echo "📦 Creating deployment package..."
           
-          echo $ROUTER_TYPE > router-type.txt
+          # Include all necessary files and directories
+          tar -czf deployment.tar.gz \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='*.log' \
+            --exclude='coverage' \
+            --exclude='.nyc_output' \
+            .next \
+            node_modules \
+            public \
+            package.json \
+            package-lock.json \
+            $(find . -name "next.config.*" -type f) \
+            $(find . -maxdepth 1 -type d -name "app" -o -name "pages" -o -name "styles" -o -name "components" -o -name "lib" -o -name "utils" -o -name "hooks" -o -name "types" -o -name "src") \
+            $(find . -maxdepth 1 -name "*.config.*" -type f) \
+            $(find . -maxdepth 1 -name "tsconfig.json" -o -name "tailwind.config.*" -o -name "postcss.config.*" -type f)
+          
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
-          echo "📂 Router type: $ROUTER_TYPE"
 
       - name: 🚀 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ steps.meta.outputs.deployment-id }}
-          path: |
-            deployment.tar.gz
-            router-type.txt
+          path: deployment.tar.gz
           retention-days: 1
 
   deploy:
@@ -102,8 +103,6 @@ jobs:
       - name: ⚙️ Setup Environment
         run: |
           BRANCH=${GITHUB_REF##*/}
-          ROUTER_TYPE=$(cat router-type.txt)
-          echo "ROUTER_TYPE=$ROUTER_TYPE" >> $GITHUB_ENV
           
           if [ "$BRANCH" = "main" ]; then
             echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
@@ -141,41 +140,63 @@ jobs:
             ConnectTimeout 10
           EOF
 
-      - name: 🚀 Zero-Downtime Deploy with Port Switching
+      - name: 🚀 Zero-Downtime Deploy with Proper File Management
         run: |
-          # Create staging directory
-          ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/staging"
+          # Create deployment directory with timestamp
+          DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           
-          # Upload deployment package
+          echo "📤 Creating deployment directory: $DEPLOY_DIR"
+          ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR"
+          
+          # Upload deployment package to timestamped directory
           echo "📤 Uploading deployment package..."
-          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/staging/deployment.tar.gz
-          scp router-type.txt deploy:${{ env.DEPLOY_PATH }}/staging/router-type.txt
+          scp deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/deployment.tar.gz
           
           # Copy environment variables
-          echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/staging/.env"
+          echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
           
-          # Execute deployment
+          # Execute deployment with proper file management
           ssh deploy << 'DEPLOY_SCRIPT'
             set -e
             
             # Setup paths
             DEPLOY_PATH="${{ env.DEPLOY_PATH }}"
-            STAGING_PATH="$DEPLOY_PATH/staging"
+            DEPLOYMENT_ID="${{ env.DEPLOYMENT_ID }}"
+            NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
             CURRENT_PATH="$DEPLOY_PATH/current"
             BACKUP_PATH="$DEPLOY_PATH/backup"
-            ROUTER_TYPE=$(cat "$STAGING_PATH/router-type.txt")
+            STAGING_PATH="$DEPLOY_PATH/staging"
             
-            echo "📂 Detected router type: $ROUTER_TYPE"
+            echo "🏗️ Setting up deployment paths..."
+            echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
+            echo "📂 Current: $CURRENT_PATH"
+            echo "📂 Staging: $STAGING_PATH"
             
-            # Create directories
-            mkdir -p "$STAGING_PATH" "$CURRENT_PATH" "$BACKUP_PATH" "$DEPLOY_PATH/logs"
+            # Create necessary directories
+            mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$BACKUP_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
             
-            cd "$STAGING_PATH"
+            cd "$NEW_DEPLOYMENT_PATH"
             
-            # Extract new deployment
+            # Extract deployment package
             echo "📦 Extracting deployment package..."
             tar -xzf deployment.tar.gz
             rm deployment.tar.gz
+            
+            # Verify extraction
+            echo "🔍 Verifying extracted files..."
+            ls -la
+            
+            if [ ! -f "package.json" ]; then
+              echo "❌ package.json not found after extraction"
+              exit 1
+            fi
+            
+            if [ ! -d ".next" ]; then
+              echo "❌ .next directory not found after extraction"
+              exit 1
+            fi
+            
+            echo "✅ Files extracted successfully"
             
             # Check current Nginx upstream port
             CURRENT_PORT=""
@@ -202,79 +223,45 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # CRITICAL FIX: Proper dependency installation
-            echo "📦 Installing production dependencies..."
+            # Install/verify dependencies
+            echo "📦 Verifying dependencies..."
             
-            # Clear any existing problematic installations
-            rm -rf node_modules
-            
-            # Verify package.json exists
-            if [ ! -f "package.json" ]; then
-              echo "❌ package.json not found"
-              exit 1
+            if [ ! -d "node_modules" ] || [ ! -f "node_modules/.bin/next" ]; then
+              echo "📦 Installing dependencies..."
+              npm ci --production=false --prefer-offline=false --no-audit --no-fund
+            else
+              echo "✅ Dependencies already present"
             fi
             
-            # Fresh install with proper flags
-            npm ci --production=false --prefer-offline=false --no-audit --no-fund
-            
-            # Verify critical Next.js files exist
-            echo "🔍 Verifying Next.js installation..."
-            
+            # Verify Next.js installation
             if [ ! -f "node_modules/.bin/next" ]; then
-              echo "❌ Next.js binary not found, attempting fresh install..."
-              npm install next@latest --save
-            fi
-            
-            if [ ! -d "node_modules/next/dist/compiled" ]; then
-              echo "❌ Next.js compiled modules missing, reinstalling Next.js..."
-              npm uninstall next
-              npm install next@latest --save
-            fi
-            
-            # Debug Next.js installation
-            echo "🔍 Debugging Next.js installation..."
-            ls -la node_modules/next/dist/compiled/ | head -10 || echo "Compiled directory listing failed"
-            ls -la node_modules/next/dist/compiled/cookie/ || echo "Cookie module not found"
-            
-            echo "✅ Dependencies installed and verified"
-            
-            # Rebuild the application to ensure all compiled assets are present
-            echo "🏗️ Rebuilding application..."
-            npm run build
-            
-            # Verify build output
-            if [ ! -d ".next" ]; then
-              echo "❌ Build failed - .next directory not found"
+              echo "❌ Next.js binary not found"
               exit 1
             fi
             
-            echo "✅ Build completed successfully"
-            
-            # Save package hash
-            echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
+            echo "✅ Dependencies verified"
             
             # Add environment variables
             echo "PORT=$NEW_PORT" >> .env
             echo "NODE_ENV=production" >> .env
+            echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> .env
             
-            # Create PM2 ecosystem for new process with enhanced configuration
+            # Create PM2 ecosystem configuration
             cat > ecosystem.config.cjs << EOF
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
               script: './node_modules/.bin/next',
               args: 'start',
-              cwd: '$STAGING_PATH',
+              cwd: '$NEW_DEPLOYMENT_PATH',
               instances: 1,
               exec_mode: 'cluster',
               env: {
                 NODE_ENV: 'production',
                 PORT: '$NEW_PORT',
-                PWD: '$STAGING_PATH',
-                NEXT_TELEMETRY_DISABLED: '1',
-                NODE_PATH: './node_modules'
+                PWD: '$NEW_DEPLOYMENT_PATH',
+                NEXT_TELEMETRY_DISABLED: '1'
               },
-              node_args: '--max-old-space-size=512',
               max_memory_restart: '512M',
               min_uptime: '10s',
               max_restarts: 3,
@@ -283,13 +270,10 @@ jobs:
               kill_timeout: 8000,
               wait_ready: true,
               listen_timeout: 15000,
-              startup_timeout: 30000,
               error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
               out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
               log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
-              time: true,
-              merge_logs: true,
-              source_map_support: true
+              time: true
             }]
           };
           EOF
@@ -304,7 +288,7 @@ jobs:
               local attempts=0
               local max_attempts=30
               
-              echo "🔍 Starting health check on port $port using /api/health..."
+              echo "🔍 Starting health check on port $port..."
               
               while [ $attempts -lt $max_attempts ]; do
                 if curl -f -s --max-time 3 "http://localhost:$port/api/health" > /dev/null 2>&1; then
@@ -317,12 +301,6 @@ jobs:
               done
               
               echo "❌ Health check failed after $max_attempts attempts"
-              echo "🔍 Checking if port is listening..."
-              netstat -tuln | grep ":$port " || echo "Port $port is not listening"
-              echo "🔍 Checking PM2 logs..."
-              pm2 logs $NEW_PROCESS --lines 20 || true
-              echo "🔍 Checking process status..."
-              pm2 describe $NEW_PROCESS || true
               return 1
             }
             
@@ -362,19 +340,39 @@ jobs:
                     pm2 delete $OLD_PROCESS
                   fi
                   
-                  # Backup current and move staging to current
-                  if [ -d "$CURRENT_PATH" ] && [ "$(ls -A $CURRENT_PATH 2>/dev/null)" ]; then
+                  # Update symlinks and preserve staging
+                  echo "🔄 Updating current deployment symlink..."
+                  
+                  # Backup current if it exists
+                  if [ -L "$CURRENT_PATH" ] || [ -d "$CURRENT_PATH" ]; then
                     rm -rf "$BACKUP_PATH"
-                    mv "$CURRENT_PATH" "$BACKUP_PATH"
+                    if [ -L "$CURRENT_PATH" ]; then
+                      cp -P "$CURRENT_PATH" "$BACKUP_PATH" 2>/dev/null || true
+                    else
+                      mv "$CURRENT_PATH" "$BACKUP_PATH" 2>/dev/null || true
+                    fi
                   fi
-                  mv "$STAGING_PATH" "$CURRENT_PATH"
-                  mkdir -p "$STAGING_PATH"
+                  
+                  # Create new current symlink
+                  ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
+                  
+                  # Copy deployment to staging for reference (not move!)
+                  echo "📋 Updating staging directory..."
+                  rm -rf "$STAGING_PATH"/*
+                  cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
                   
                   # Save PM2 configuration
                   pm2 save
                   
+                  # Cleanup old deployments (keep last 3)
+                  echo "🧹 Cleaning up old deployments..."
+                  cd "$DEPLOY_PATH/deployments"
+                  ls -t | tail -n +4 | xargs -r rm -rf
+                  
                   echo "🎉 Zero-downtime deployment completed successfully!"
                   echo "📊 Active process: $NEW_PROCESS on port $NEW_PORT"
+                  echo "📂 Current deployment: $NEW_DEPLOYMENT_PATH"
+                  echo "📂 Staging contains: $(ls -la $STAGING_PATH | wc -l) items"
                   
                 else
                   echo "❌ External health check failed after Nginx switch"
@@ -405,8 +403,6 @@ jobs:
               
             else
               echo "❌ New process failed health check"
-              echo "🔍 Final debug information:"
-              pm2 logs $NEW_PROCESS --lines 50 || true
               pm2 stop $NEW_PROCESS || true
               pm2 delete $NEW_PROCESS || true
               exit 1
@@ -432,8 +428,16 @@ jobs:
             netstat -tuln | grep -E ':(5005|5006) '
             
             echo ""
-            echo "🔗 Current Directory:"
+            echo "🔗 Current Directory (symlink):"
             ls -la ${{ env.DEPLOY_PATH }}/current
+            
+            echo ""
+            echo "📂 Staging Directory Contents:"
+            ls -la ${{ env.DEPLOY_PATH }}/staging
+            
+            echo ""
+            echo "📦 Deployments Directory:"
+            ls -la ${{ env.DEPLOY_PATH }}/deployments
             
             echo ""
             echo "📦 Next.js Version:"
@@ -443,7 +447,7 @@ jobs:
       - name: 🧹 Cleanup
         if: always()
         run: |
-          rm -f ~/.ssh/deploy_key deployment.tar.gz router-type.txt
+          rm -f ~/.ssh/deploy_key deployment.tar.gz
           echo "✅ Cleanup completed"
 
   notify:
