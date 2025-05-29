@@ -98,7 +98,7 @@ jobs:
           
           if [ "$BRANCH" = "main" ]; then
             # Production environment
-            SERVER="${{ secrets.PROD_SERVER_HOST }}"
+            SERVER="${{ secrets.PROD_DOMAIN }}"
             USER="${{ secrets.PROD_SERVER_USER }}"
             PORT_SSH="${{ secrets.PROD_SSH_PORT }}"
             DEPLOY_PATH="${{ secrets.PROD_SERVER_PATH }}"
@@ -110,7 +110,7 @@ jobs:
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
           else
             # Development environment
-            SERVER="${{ secrets.DEV_SERVER_HOST }}"
+            SERVER="${{ secrets.DEV_DOMAIN }}"
             USER="${{ secrets.DEV_SERVER_USER }}"
             PORT_SSH="${{ secrets.DEV_SSH_PORT }}"
             DEPLOY_PATH="${{ secrets.DEV_SERVER_PATH }}"
