@@ -64,15 +64,15 @@ jobs:
           if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
-            tar -czf deployment.tar.gz .
+            tar -czf deployment.tar.gz .next app node_modules public package.json package-lock.json next.config.*
           elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
-            tar -czf deployment.tar.gz .
+            tar -czf deployment.tar.gz .next pages styles eslint.config.mjs postcss.config.mjs tsconfig.json node_modules public package.json package-lock.json next.config.*
           else
             echo "📂 Basic Next.js setup detected"
             ROUTER_TYPE="basic"
-            tar -czf deployment.tar.gz .
+            tar -czf deployment.tar.gz .next public node_modules package.json package-lock.json next.config.*
           fi
           
           echo $ROUTER_TYPE > router-type.txt
