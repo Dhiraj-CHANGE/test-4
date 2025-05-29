@@ -437,7 +437,7 @@ jobs:
             
             echo ""
             echo "📦 Next.js Version:"
-            cd ${{ env.DEPLOY_PATH }}/current && node -e "console.log('Next.js version:', require('./node_modules/next/package.json').version)"
+            cd ${{ env.DEPLOY_PATH }}/current && node -e
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
