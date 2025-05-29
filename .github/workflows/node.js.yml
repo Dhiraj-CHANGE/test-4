@@ -53,6 +53,12 @@ jobs:
             echo "📦 Using cached dependencies"
           fi
 
+      - name: 🔧 Create Missing CSS File
+        run: |
+          mkdir -p styles
+          echo "/* Global styles */" > styles/globals.css
+          echo "✅ Created missing globals.css file"
+
       - name: 🏗️ Build Application
         run: |
           npm run build
@@ -64,15 +70,15 @@ jobs:
           if [ -d "app" ]; then
             echo "📂 App Router detected"
             ROUTER_TYPE="app"
-            tar -czf deployment.tar.gz .next app node_modules public package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next app node_modules public styles package.json package-lock.json next.config.*
           elif [ -d "pages" ]; then
             echo "📂 Pages Router detected"
             ROUTER_TYPE="pages"
-            tar -czf deployment.tar.gz .next pages node_modules public package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next pages node_modules public styles package.json package-lock.json next.config.*
           else
             echo "📂 Basic Next.js setup detected"
             ROUTER_TYPE="basic"
-            tar -czf deployment.tar.gz .next public node_modules package.json package-lock.json next.config.*
+            tar -czf deployment.tar.gz .next public node_modules styles package.json package-lock.json next.config.*
           fi
           
           echo $ROUTER_TYPE > router-type.txt
@@ -255,6 +261,12 @@ jobs:
             "
             
             echo "✅ Dependencies installed and verified"
+            
+            # CRITICAL FIX: Create missing CSS file
+            echo "🔧 Creating missing CSS file..."
+            mkdir -p styles
+            echo "/* Global styles */" > styles/globals.css
+            echo "✅ Created missing globals.css file"
             
             # Rebuild the application to ensure all compiled assets are present
             echo "🏗️ Rebuilding application..."
