@@ -91,7 +91,7 @@ jobs:
           name: app-${{ needs.build.outputs.deployment-id }}
           path: .
 
-      - name: ⚙️ Setup Environment
+      - name: ⚙️ Setup Environment Variables
         run: |
           BRANCH=${GITHUB_REF##*/}
           
@@ -99,36 +99,53 @@ jobs:
             echo "DEPLOY_PATH=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.PROD_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_ENV
-            echo "SSH_KEY=${{ secrets.PROD_SSH_PRIVATE_KEY }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.PROD_PROCESS_NAME}}" >> $GITHUB_ENV
             echo "PORT_A=${{ secrets.PROD_PORT_A}}" >> $GITHUB_ENV
             echo "PORT_B=${{ secrets.PROD_PORT_B}}" >> $GITHUB_ENV
             echo "DOMAIN=${{ secrets.PROD_DOMAIN}}" >> $GITHUB_ENV
+            echo "ENV_SECRET_NAME=PROD_ENV_SECRET" >> $GITHUB_ENV
+            echo "SSH_KEY_SECRET_NAME=PROD_SSH_PRIVATE_KEY" >> $GITHUB_ENV
           else
             echo "DEPLOY_PATH=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_ENV
             echo "SERVER=${{ secrets.DEV_SERVER_HOST }}" >> $GITHUB_ENV
             echo "USER=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_ENV
-            echo "SSH_KEY=${{ secrets.DEV_SSH_PRIVATE_KEY }}" >> $GITHUB_ENV
             echo "PORT_SSH=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_ENV
             echo "PROCESS_NAME=${{ secrets.DEV_PROCESS_NAME}}" >> $GITHUB_ENV
             echo "PORT_A=${{ secrets.DEV_PORT_A}}" >> $GITHUB_ENV
             echo "PORT_B=${{ secrets.DEV_PORT_B}}" >> $GITHUB_ENV
             echo "DOMAIN=${{ secrets.DEV_DOMAIN}}" >> $GITHUB_ENV
+            echo "ENV_SECRET_NAME=DEV_ENV_SECRET" >> $GITHUB_ENV
+            echo "SSH_KEY_SECRET_NAME=DEV_SSH_PRIVATE_KEY" >> $GITHUB_ENV
           fi
           
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
 
-      - name: 🔐 Fix SSH Setup
+      - name: 🔐 Setup SSH Configuration
         run: |
           # Create SSH directory
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           
-          # Write private key directly
-          echo '${{ secrets.PROD_SSH_PRIVATE_KEY }}' > ~/.ssh/deploy_key
+          # Determine which SSH key to use based on branch
+          BRANCH=${GITHUB_REF##*/}
+          if [ "$BRANCH" = "main" ]; then
+            SSH_KEY='${{ secrets.PROD_SSH_PRIVATE_KEY }}'
+          else
+            SSH_KEY='${{ secrets.DEV_SSH_PRIVATE_KEY }}'
+          fi
+          
+          # Write SSH private key
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           
-          # Create proper SSH config with explicit values
+          # Verify SSH key format
+          if ! ssh-keygen -l -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+            echo "❌ Invalid SSH key format"
+            exit 1
+          fi
+          
+          # Create SSH config
           cat > ~/.ssh/config << EOF
           Host deploy
             HostName ${{ env.SERVER }}
@@ -137,33 +154,45 @@ jobs:
             IdentityFile ~/.ssh/deploy_key
             StrictHostKeyChecking no
             ServerAliveInterval 30
-            ConnectTimeout 5
+            ConnectTimeout 10
             Compression yes
           EOF
           
           # Verify SSH config
+          echo "🔍 SSH Config:"
           cat ~/.ssh/config
           
           # Test SSH connection
-          ssh -o BatchMode=yes -o ConnectTimeout=5 deploy "echo SSH connection successful"
+          echo "🔍 Testing SSH connection..."
+          if ssh -o BatchMode=yes -o ConnectTimeout=10 deploy "echo 'SSH connection successful'"; then
+            echo "✅ SSH connection test passed"
+          else
+            echo "❌ SSH connection test failed"
+            exit 1
+          fi
 
       - name: 🧹 Clean Old Deployments First
         run: |
-          # Clean old deployments before new deployment to ensure space
-          ssh deploy "cd ${{ env.DEPLOY_PATH }}/deployments && ls -t | tail -n +3 | xargs -r rm -rf"
+          echo "🧹 Cleaning old deployments (keeping only 2 most recent)..."
+          ssh deploy "cd ${{ env.DEPLOY_PATH }}/deployments 2>/dev/null && ls -t | tail -n +3 | xargs -r rm -rf || echo 'No old deployments to clean'"
 
       - name: 🚀 Deploy Application
         run: |
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           
-          # Create deployment directory
+          echo "📤 Creating deployment directory: $DEPLOY_DIR"
           ssh deploy "mkdir -p ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR"
           
-          # Upload deployment package
+          echo "📤 Uploading deployment package..."
           scp -C deployment.tar.gz deploy:${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/deployment.tar.gz
           
-          # Copy environment variables
-          echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
+          # Copy environment variables based on branch
+          BRANCH=${GITHUB_REF##*/}
+          if [ "$BRANCH" = "main" ]; then
+            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
+          else
+            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > ${{ env.DEPLOY_PATH }}/deployments/$DEPLOY_DIR/.env"
+          fi
           
           # Execute deployment script
           ssh deploy << 'DEPLOY_SCRIPT'
@@ -175,6 +204,11 @@ jobs:
             NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
             CURRENT_PATH="$DEPLOY_PATH/current"
             STAGING_PATH="$DEPLOY_PATH/staging"
+            
+            echo "🏗️ Setting up deployment paths..."
+            echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
+            echo "📂 Current: $CURRENT_PATH"
+            echo "📂 Staging: $STAGING_PATH"
             
             # Create directories
             mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
@@ -188,6 +222,8 @@ jobs:
             # Verify critical files
             [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
             [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
+            
+            echo "✅ Package extracted and verified"
             
             # Smart detection of deployment type
             FIRST_DEPLOYMENT=false
@@ -322,44 +358,6 @@ jobs:
               echo "✅ Nginx reloaded successfully"
               sleep 3
               
-              # Enhanced external health check with debugging
-              echo "🌐 Testing external access..."
-              echo "🔍 Debug: Testing URL https://${{ env.DOMAIN }}/api/health"
-              
-              # First, test if Nginx is routing correctly
-              echo "🔍 Testing Nginx routing..."
-              NGINX_TEST=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost/api/health" 2>/dev/null || echo "000")
-              echo "🔍 Nginx local test result: $NGINX_TEST"
-              
-              # Test external access with more detailed debugging
-              EXTERNAL_SUCCESS=false
-              
-              for i in {1..15}; do
-                echo "🔄 External health check attempt $i/15..."
-                
-                # Try with different curl options for better debugging
-                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}:%{time_total}" --max-time 5 "https://${{ env.DOMAIN }}/api/health" 2>/dev/null || echo "000:timeout")
-                HTTP_CODE=$(echo $RESPONSE | cut -d: -f1)
-                TIME_TAKEN=$(echo $RESPONSE | cut -d: -f2)
-                
-                echo "🔍 Response: HTTP $HTTP_CODE (${TIME_TAKEN}s)"
-                
-                if [ "$HTTP_CODE" = "200" ]; then
-                  echo "✅ External health check passed (attempt $i)"
-                  EXTERNAL_SUCCESS=true
-                  break
-                fi
-                
-                # Add progressive delay
-                if [ $i -lt 5 ]; then
-                  sleep 2
-                elif [ $i -lt 10 ]; then
-                  sleep 3
-                else
-                  sleep 5
-                fi
-              done
-              
               # Always proceed with deployment since local health check passed
               echo "✅ Local health check passed, proceeding with deployment"
               
@@ -387,8 +385,8 @@ jobs:
               # Save PM2 and cleanup
               pm2 save
               
-              # Keep only 2 most recent deployments (double-check)
-              echo "🧹 Cleaning up old deployments (keeping only 2 most recent)..."
+              # Keep only 2 most recent deployments (final cleanup)
+              echo "🧹 Final cleanup - keeping only 2 most recent deployments..."
               cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
               
               echo "🎉 Deployment completed successfully!"
@@ -423,6 +421,10 @@ jobs:
             echo ""
             echo "📂 Staging Directory:"
             ls -la ${{ env.DEPLOY_PATH }}/staging
+            
+            echo ""
+            echo "🌐 Health Check Test:"
+            curl -s "https://${{ env.DOMAIN }}/api/health" || echo "External health check failed"
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
