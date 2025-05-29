@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v1'
+  CACHE_VERSION: 'v2'  # Bumped version to invalidate old cache
 
 jobs:
   build:
@@ -33,19 +33,26 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
+      - name: 🔄 Cache Dependencies Only
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ env.CACHE_VERSION }}-deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ env.CACHE_VERSION }}-deps-${{ runner.os }}-
+
       - name: 🔄 Cache Build Output
         id: cache-check
         uses: actions/cache@v3
         with:
-          path: |
-            .next
-            node_modules
-          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          path: .next
+          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}
           restore-keys: |
-            ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-
+            ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
 
-      - name: 🚀 Fast Install Dependencies
-        if: steps.cache-check.outputs.cache-hit != 'true'
+      - name: 🚀 Install Dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
           npm ci --prefer-offline --no-audit --no-fund --silent --progress=false
           echo "📦 Dependencies installed"
@@ -59,6 +66,18 @@ jobs:
       - name: 📦 Create Optimized Package
         run: |
           echo "📦 Creating optimized package..."
+          
+          # Verify build exists
+          if [ ! -d ".next" ]; then
+            echo "❌ .next directory not found! Build may have failed."
+            exit 1
+          fi
+          
+          # Show build info
+          echo "📊 Build info:"
+          echo "  - .next size: $(du -sh .next | cut -f1)"
+          echo "  - node_modules size: $(du -sh node_modules | cut -f1)"
+          
           tar -czf deployment.tar.gz \
             --exclude='node_modules/.cache' \
             --exclude='node_modules/*/test*' \
@@ -272,7 +291,10 @@ jobs:
             [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
             [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
             
+            # Show build timestamp to verify it's fresh
             echo "✅ Package extracted and verified"
+            echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
+            echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
             
             # Smart detection of deployment type
             FIRST_DEPLOYMENT=false
