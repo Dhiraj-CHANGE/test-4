@@ -34,7 +34,7 @@ export default function Home() {
             .
           </li>
           <li className="tracking-[-.01em]">
-            COMMANDO  Networks
+            Dhiraj chaudhari
           </li>
         </ol>
         <div className="flex gap-4 items-center flex-col sm:flex-row">
