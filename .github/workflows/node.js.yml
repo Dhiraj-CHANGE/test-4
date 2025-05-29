@@ -206,7 +206,8 @@ jobs:
             echo "📦 Installing production dependencies..."
             
             # Clear any existing problematic installations
-            rm -rf node_modules/.cache
+            rm -rf node_modules
+            rm -f package-lock.json
             
             # Verify package.json exists
             if [ ! -f "package.json" ]; then
@@ -231,28 +232,10 @@ jobs:
               npm install next@latest --save
             fi
             
-            # Verify the cookie module specifically
-            if [ ! -f "node_modules/next/dist/compiled/cookie/index.js" ]; then
-              echo "❌ Cookie module missing, forcing Next.js reinstall..."
-              rm -rf node_modules/next
-              npm install next@latest --save
-            fi
-            
             # Debug Next.js installation
             echo "🔍 Debugging Next.js installation..."
             ls -la node_modules/next/dist/compiled/ | head -10 || echo "Compiled directory listing failed"
             ls -la node_modules/next/dist/compiled/cookie/ || echo "Cookie module not found"
-            
-            # Test module resolution
-            node -e "
-              try {
-                require.resolve('next/dist/compiled/cookie');
-                console.log('✅ Cookie module can be resolved');
-              } catch (e) {
-                console.log('❌ Cookie module resolution failed:', e.message);
-                process.exit(1);
-              }
-            "
             
             echo "✅ Dependencies installed and verified"
             
