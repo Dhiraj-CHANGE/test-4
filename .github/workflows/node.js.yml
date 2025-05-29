@@ -202,22 +202,71 @@ jobs:
             echo "🔄 Current port: $CURRENT_PORT, New port: $NEW_PORT"
             echo "🔄 New process: $NEW_PROCESS, Old process: $OLD_PROCESS"
             
-            # Install production dependencies (CRITICAL FIX)
+            # CRITICAL FIX: Proper dependency installation
             echo "📦 Installing production dependencies..."
-
             
-            # Verify Next.js installation
-            if [ ! -f "node_modules/.bin/next" ]; then
-              echo "❌ Next.js binary not found after installation"
+            # Clear any existing problematic installations
+            rm -rf node_modules/.cache
+            
+            # Verify package.json exists
+            if [ ! -f "package.json" ]; then
+              echo "❌ package.json not found"
               exit 1
+            fi
+            
+            # Fresh install with proper flags
+            npm ci --production=false --prefer-offline=false --no-audit --no-fund
+            
+            # Verify critical Next.js files exist
+            echo "🔍 Verifying Next.js installation..."
+            
+            if [ ! -f "node_modules/.bin/next" ]; then
+              echo "❌ Next.js binary not found, attempting fresh install..."
+              npm install next@latest --save
             fi
             
             if [ ! -d "node_modules/next/dist/compiled" ]; then
-              echo "❌ Next.js compiled modules not found"
+              echo "❌ Next.js compiled modules missing, reinstalling Next.js..."
+              npm uninstall next
+              npm install next@latest --save
+            fi
+            
+            # Verify the cookie module specifically
+            if [ ! -f "node_modules/next/dist/compiled/cookie/index.js" ]; then
+              echo "❌ Cookie module missing, forcing Next.js reinstall..."
+              rm -rf node_modules/next
+              npm install next@latest --save
+            fi
+            
+            # Debug Next.js installation
+            echo "🔍 Debugging Next.js installation..."
+            ls -la node_modules/next/dist/compiled/ | head -10 || echo "Compiled directory listing failed"
+            ls -la node_modules/next/dist/compiled/cookie/ || echo "Cookie module not found"
+            
+            # Test module resolution
+            node -e "
+              try {
+                require.resolve('next/dist/compiled/cookie');
+                console.log('✅ Cookie module can be resolved');
+              } catch (e) {
+                console.log('❌ Cookie module resolution failed:', e.message);
+                process.exit(1);
+              }
+            "
+            
+            echo "✅ Dependencies installed and verified"
+            
+            # Rebuild the application to ensure all compiled assets are present
+            echo "🏗️ Rebuilding application..."
+            npm run build
+            
+            # Verify build output
+            if [ ! -d ".next" ]; then
+              echo "❌ Build failed - .next directory not found"
               exit 1
             fi
             
-            echo "✅ Dependencies installed and verified"
+            echo "✅ Build completed successfully"
             
             # Save package hash
             echo "${{ env.PACKAGE_HASH }}" > package-hash.txt
@@ -226,12 +275,12 @@ jobs:
             echo "PORT=$NEW_PORT" >> .env
             echo "NODE_ENV=production" >> .env
             
-            # Create PM2 ecosystem for new process
+            # Create PM2 ecosystem for new process with enhanced configuration
             cat > ecosystem.config.cjs << EOF
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
-              script: 'node_modules/.bin/next',
+              script: './node_modules/.bin/next',
               args: 'start',
               cwd: '$STAGING_PATH',
               instances: 1,
@@ -240,8 +289,10 @@ jobs:
                 NODE_ENV: 'production',
                 PORT: '$NEW_PORT',
                 PWD: '$STAGING_PATH',
-                NEXT_TELEMETRY_DISABLED: '1'
+                NEXT_TELEMETRY_DISABLED: '1',
+                NODE_PATH: './node_modules'
               },
+              node_args: '--max-old-space-size=512',
               max_memory_restart: '512M',
               min_uptime: '10s',
               max_restarts: 3,
@@ -250,6 +301,7 @@ jobs:
               kill_timeout: 8000,
               wait_ready: true,
               listen_timeout: 15000,
+              startup_timeout: 30000,
               error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
               out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
               log_file: '$DEPLOY_PATH/logs/$NEW_PROCESS.log',
@@ -286,13 +338,15 @@ jobs:
               echo "🔍 Checking if port is listening..."
               netstat -tuln | grep ":$port " || echo "Port $port is not listening"
               echo "🔍 Checking PM2 logs..."
-              pm2 logs $NEW_PROCESS --lines 10 || true
+              pm2 logs $NEW_PROCESS --lines 20 || true
+              echo "🔍 Checking process status..."
+              pm2 describe $NEW_PROCESS || true
               return 1
             }
             
             # Wait for new process to be ready
             echo "⏳ Waiting for new process to be ready..."
-            sleep 8
+            sleep 10
             
             if health_check $NEW_PORT; then
               echo "✅ New process is healthy on port $NEW_PORT"
@@ -369,6 +423,8 @@ jobs:
               
             else
               echo "❌ New process failed health check"
+              echo "🔍 Final debug information:"
+              pm2 logs $NEW_PROCESS --lines 50 || true
               pm2 stop $NEW_PROCESS || true
               pm2 delete $NEW_PROCESS || true
               exit 1
@@ -396,6 +452,10 @@ jobs:
             echo ""
             echo "🔗 Current Directory:"
             ls -la ${{ env.DEPLOY_PATH }}/current
+            
+            echo ""
+            echo "📦 Next.js Version:"
+            cd ${{ env.DEPLOY_PATH }}/current && node -e "console.log('Next.js version:', require('./node_modules/next/package.json').version)"
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
