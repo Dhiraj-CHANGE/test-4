@@ -266,11 +266,11 @@ jobs:
           # Define variables locally first
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           BRANCH="${{ needs.build.outputs.branch }}"
-          UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
-          DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
-          PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
-          PORT_A="${{ steps.env-setup.outputs.port-a }}"
-          PORT_B="${{ steps.env-setup.outputs.port-b }}"
+          UPSTREAM_NAME="$UPSTREAM_NAME"
+          DEPLOY_PATH="$DEPLOY_PATH"
+          PROCESS_NAME="$PROCESS_NAME"
+          PORT_A="$PORT_A"
+          PORT_B="$PORT_B"
           
           # Verify all required variables are set
           echo "🔍 Verifying deployment variables..."
