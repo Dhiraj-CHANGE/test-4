@@ -136,8 +136,9 @@ jobs:
             DOMAIN="${{ secrets.PROD_DOMAIN }}"
             ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            # For production, use the existing upstream name that the site config expects
+            # For production, use the existing upstream name
             UPSTREAM_NAME="test1_backend"
+            SITE_CONFIG_PATH="/etc/nginx/sites-enabled/***-change"
           else
             # Development environment
             SERVER="${{ secrets.DEV_DOMAIN }}"
@@ -150,8 +151,9 @@ jobs:
             DOMAIN="${{ secrets.DEV_DOMAIN }}"
             ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
             SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
-            # For development, use the same upstream name that the site config expects
+            # For development, use a different upstream name
             UPSTREAM_NAME="test1_dev_backend"
+            SITE_CONFIG_PATH="/etc/nginx/sites-enabled/***-change"
           fi
           
           # Validate required variables
@@ -190,6 +192,7 @@ jobs:
           echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
           echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
           echo "upstream-name=$UPSTREAM_NAME" >> $GITHUB_OUTPUT
+          echo "site-config-path=$SITE_CONFIG_PATH" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           
           # Set environment variables for this job
@@ -203,6 +206,7 @@ jobs:
           echo "PORT_B=$PORT_B" >> $GITHUB_ENV
           echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
           echo "UPSTREAM_NAME=$UPSTREAM_NAME" >> $GITHUB_ENV
+          echo "SITE_CONFIG_PATH=$SITE_CONFIG_PATH" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH Configuration
         run: |
@@ -256,6 +260,42 @@ jobs:
             exit 1
           fi
 
+      - name: 🔍 Analyze Nginx Configuration
+        id: nginx-analyze
+        run: |
+          BRANCH="${{ needs.build.outputs.branch }}"
+          UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+          SITE_CONFIG_PATH="${{ steps.env-setup.outputs.site-config-path }}"
+          
+          echo "🔍 Analyzing Nginx configuration..."
+          
+          # Check if site config exists
+          SITE_CONFIG_EXISTS=$(ssh deploy "[ -f \"$SITE_CONFIG_PATH\" ] && echo 'yes' || echo 'no'")
+          
+          if [ "$SITE_CONFIG_EXISTS" = "yes" ]; then
+            echo "✅ Site configuration found at $SITE_CONFIG_PATH"
+            
+            # Check what upstream name is currently used in the site config
+            CURRENT_UPSTREAM=$(ssh deploy "grep -o 'upstream[[:space:]]*[^[:space:]]*' $SITE_CONFIG_PATH | head -1 | awk '{print \$2}'")
+            
+            echo "🔍 Current upstream name in site config: $CURRENT_UPSTREAM"
+            
+            # Check if we need to update the site config
+            if [ "$CURRENT_UPSTREAM" != "$UPSTREAM_NAME" ]; then
+              echo "⚠️ Site config uses '$CURRENT_UPSTREAM' but we want to use '$UPSTREAM_NAME'"
+              NEEDS_UPDATE="yes"
+            else
+              echo "✅ Site config already uses the correct upstream name: $UPSTREAM_NAME"
+              NEEDS_UPDATE="no"
+            fi
+          else
+            echo "❌ Site configuration not found at $SITE_CONFIG_PATH"
+            NEEDS_UPDATE="no"
+          fi
+          
+          echo "needs-update=$NEEDS_UPDATE" >> $GITHUB_OUTPUT
+          echo "current-upstream=$CURRENT_UPSTREAM" >> $GITHUB_OUTPUT
+
       - name: 🧹 Clean Old Deployments First
         run: |
           echo "🧹 Cleaning old deployments (keeping only 2 most recent)..."
@@ -267,6 +307,9 @@ jobs:
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           BRANCH="${{ needs.build.outputs.branch }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+          SITE_CONFIG_PATH="${{ steps.env-setup.outputs.site-config-path }}"
+          CURRENT_UPSTREAM="${{ steps.nginx-analyze.outputs.current-upstream }}"
+          NEEDS_UPDATE="${{ steps.nginx-analyze.outputs.needs-update }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
           PORT_A="${{ steps.env-setup.outputs.port-a }}"
@@ -277,6 +320,9 @@ jobs:
           echo "  - DEPLOY_DIR: $DEPLOY_DIR"
           echo "  - BRANCH: $BRANCH"
           echo "  - UPSTREAM_NAME: $UPSTREAM_NAME"
+          echo "  - SITE_CONFIG_PATH: $SITE_CONFIG_PATH"
+          echo "  - CURRENT_UPSTREAM: $CURRENT_UPSTREAM"
+          echo "  - NEEDS_UPDATE: $NEEDS_UPDATE"
           echo "  - DEPLOY_PATH: $DEPLOY_PATH"
           echo "  - PROCESS_NAME: $PROCESS_NAME"
           echo "  - PORT_A: $PORT_A"
@@ -309,9 +355,13 @@ jobs:
           DEPLOY_PATH="__DEPLOY_PATH__"
           DEPLOYMENT_ID="__DEPLOYMENT_ID__"
           UPSTREAM_NAME="__UPSTREAM_NAME__"
+          SITE_CONFIG_PATH="__SITE_CONFIG_PATH__"
+          CURRENT_UPSTREAM="__CURRENT_UPSTREAM__"
+          NEEDS_UPDATE="__NEEDS_UPDATE__"
           PROCESS_NAME="__PROCESS_NAME__"
           PORT_A="__PORT_A__"
           PORT_B="__PORT_B__"
+          BRANCH="__BRANCH__"
           
           # Setup paths
           NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
@@ -323,6 +373,10 @@ jobs:
           echo "📂 Current: $CURRENT_PATH"
           echo "📂 Staging: $STAGING_PATH"
           echo "🔧 Upstream name: $UPSTREAM_NAME"
+          echo "🔧 Site config path: $SITE_CONFIG_PATH"
+          echo "🔧 Current upstream in site config: $CURRENT_UPSTREAM"
+          echo "🔧 Needs site config update: $NEEDS_UPDATE"
+          echo "🌿 Branch: $BRANCH"
           
           # Create directories
           mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
@@ -461,14 +515,28 @@ jobs:
             fi
           fi
           
-          # Update the upstream configuration that the existing site config expects
-          echo "🔄 Updating upstream $UPSTREAM_NAME to point to port $NEW_PORT..."
+          # Update the upstream configuration
+          echo "🔄 Creating/updating upstream $UPSTREAM_NAME to point to port $NEW_PORT..."
           sudo mkdir -p /etc/nginx/conf.d/
           sudo tee "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" > /dev/null << EOFNGINX
           upstream $UPSTREAM_NAME {
               server 127.0.0.1:$NEW_PORT;
           }
           EOFNGINX
+          
+          # If we need to update the site config to use our new upstream name
+          if [ "$NEEDS_UPDATE" = "yes" ] && [ -f "$SITE_CONFIG_PATH" ]; then
+            echo "🔄 Updating site config to use upstream $UPSTREAM_NAME instead of $CURRENT_UPSTREAM..."
+            
+            # Create a backup of the original site config
+            BACKUP_PATH="${SITE_CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+            sudo cp "$SITE_CONFIG_PATH" "$BACKUP_PATH"
+            echo "✅ Created backup of site config at $BACKUP_PATH"
+            
+            # Replace the upstream name in the site config
+            sudo sed -i "s/upstream[[:space:]]*$CURRENT_UPSTREAM/upstream $UPSTREAM_NAME/g" "$SITE_CONFIG_PATH"
+            echo "✅ Updated site config to use upstream $UPSTREAM_NAME"
+          fi
           
           # Test Nginx configuration
           echo "🔍 Testing Nginx configuration..."
@@ -523,6 +591,13 @@ jobs:
             echo "🔍 Checking for conflicting upstream definitions..."
             grep -r "upstream.*$UPSTREAM_NAME" /etc/nginx/ || true
             
+            # If we modified the site config and it failed, restore the backup
+            if [ "$NEEDS_UPDATE" = "yes" ] && [ -f "$BACKUP_PATH" ]; then
+              echo "🔄 Restoring site config from backup..."
+              sudo cp "$BACKUP_PATH" "$SITE_CONFIG_PATH"
+              echo "✅ Restored site config from backup"
+            fi
+            
             pm2 delete $NEW_PROCESS
             exit 1
           fi
@@ -532,9 +607,13 @@ jobs:
           sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g" deploy_script.sh
           sed -i "s|__DEPLOYMENT_ID__|$DEPLOY_DIR|g" deploy_script.sh
           sed -i "s|__UPSTREAM_NAME__|$UPSTREAM_NAME|g" deploy_script.sh
+          sed -i "s|__SITE_CONFIG_PATH__|$SITE_CONFIG_PATH|g" deploy_script.sh
+          sed -i "s|__CURRENT_UPSTREAM__|$CURRENT_UPSTREAM|g" deploy_script.sh
+          sed -i "s|__NEEDS_UPDATE__|$NEEDS_UPDATE|g" deploy_script.sh
           sed -i "s|__PROCESS_NAME__|$PROCESS_NAME|g" deploy_script.sh
           sed -i "s|__PORT_A__|$PORT_A|g" deploy_script.sh
           sed -i "s|__PORT_B__|$PORT_B|g" deploy_script.sh
+          sed -i "s|__BRANCH__|$BRANCH|g" deploy_script.sh
           
           # Upload and execute the script
           scp deploy_script.sh deploy:$DEPLOY_PATH/deployments/$DEPLOY_DIR/deploy_script.sh
@@ -548,6 +627,7 @@ jobs:
           BRANCH="${{ needs.build.outputs.branch }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+          SITE_CONFIG_PATH="${{ steps.env-setup.outputs.site-config-path }}"
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
@@ -556,6 +636,10 @@ jobs:
             echo ""
             echo "🔧 Nginx Upstream Config:"
             cat /etc/nginx/conf.d/$UPSTREAM_NAME.conf 2>/dev/null || echo "No upstream config"
+            
+            echo ""
+            echo "🔧 Site Config (relevant part):"
+            grep -A 5 -B 5 "$UPSTREAM_NAME" $SITE_CONFIG_PATH 2>/dev/null || echo "Upstream not found in site config"
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
