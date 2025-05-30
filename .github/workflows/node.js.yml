@@ -312,7 +312,7 @@ jobs:
             else
               echo "🔄 Found existing processes - Regular update"
               # Get current port from Nginx config
-              if [ -f "/etc/nginx/conf.d/$NGINX_CONF".conf" ]; then
+              if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
                 CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/"$NGINX_CONF".conf | cut -d: -f2)
                 echo "📍 Current Nginx port: $CURRENT_PORT"
               fi
@@ -420,7 +420,7 @@ jobs:
             # Update Nginx config
             echo "🔄 Updating Nginx to point to port $NEW_PORT..."
             sudo tee "/etc/nginx/conf.d/"$NGINX_CONF".conf" > /dev/null << EOF
-          upstream ${NGINX_CONF//-/_} {
+          upstream "$NGINX_CONF" {
               server 127.0.0.1:$NEW_PORT;
           }
           EOF
