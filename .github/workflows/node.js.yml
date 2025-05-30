@@ -375,18 +375,9 @@ jobs:
               NEW_PROCESS="$PROCESS_NAME-b"
               OLD_PROCESS="$PROCESS_NAME-a"
             else
-<<<<<<< HEAD
-              echo "🔄 Found existing processes - Regular update"
-              # Get current port from Nginx config
-              if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
-                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/"$NGINX_CONF".conf | cut -d: -f2)
-                echo "📍 Current Nginx port: $CURRENT_PORT"
-              fi
-=======
               NEW_PORT="$PORT_A"
               NEW_PROCESS="$PROCESS_NAME-a"
               OLD_PROCESS="$PROCESS_NAME-b"
->>>>>>> 859f8bf65a92b7a6f9c6d34f4012afb2151b93c5
             fi
             echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
             echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
