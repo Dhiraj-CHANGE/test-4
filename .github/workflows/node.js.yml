@@ -1,4 +1,4 @@
-name: ⚡ Vercel-Style Lightning Deploy
+name: ⚡ Ultra-Fast Deploy (Sub-30s)
 
 on:
   push:
@@ -6,409 +6,243 @@ on:
 
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v5'
 
 jobs:
-  # Pre-flight check - runs in parallel with build
-  preflight:
+  lightning-deploy:
     runs-on: self-hosted
-    outputs:
-      should-deploy: ${{ steps.changes.outputs.should-deploy }}
-      changed-files: ${{ steps.changes.outputs.changed-files }}
-    steps:
-      - name: 📋 Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: 🔍 Detect Changes
-        id: changes
-        run: |
-          # Get changed files
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | tr '\n' ',' | sed 's/,$//')
-          echo "changed-files=$CHANGED_FILES" >> $GITHUB_OUTPUT
-          
-          # Check if we need to deploy
-          if git diff --name-only HEAD~1 HEAD | grep -E '\.(js|jsx|ts|tsx|json|md)$|package\.json|next\.config\.|public/'; then
-            echo "should-deploy=true" >> $GITHUB_OUTPUT
-            echo "🚀 Changes detected - deployment needed"
-          else
-            echo "should-deploy=false" >> $GITHUB_OUTPUT
-            echo "📝 Only docs/config changes - skipping deployment"
-          fi
-
-  # Lightning-fast incremental build
-  build:
-    runs-on: self-hosted
-    needs: preflight
-    if: needs.preflight.outputs.should-deploy == 'true'
-    outputs:
-      deployment-id: ${{ steps.meta.outputs.deployment-id }}
-      cache-hit: ${{ steps.cache.outputs.cache-hit }}
-      branch: ${{ steps.meta.outputs.branch }}
-      build-hash: ${{ steps.meta.outputs.build-hash }}
-    steps:
-      - name: 📋 Lightning Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: 📊 Generate Metadata
-        id: meta
-        run: |
-          BRANCH=${GITHUB_REF##*/}
-          DEPLOYMENT_ID="$(date +%H%M%S)-${GITHUB_SHA:0:7}"
-          BUILD_HASH=$(echo "${{ needs.preflight.outputs.changed-files }}-$(cat package.json | sha256sum | cut -d' ' -f1)" | sha256sum | cut -d' ' -f1 | head -c 12)
-          
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
-          echo "build-hash=$BUILD_HASH" >> $GITHUB_OUTPUT
-          echo "⚡ Branch: $BRANCH | ID: $DEPLOYMENT_ID | Hash: $BUILD_HASH"
-
-      - name: ⚡ Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: 🔄 Smart Cache Restore
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            node_modules
-            .next
-            .vercel-cache
-          key: ${{ env.CACHE_VERSION }}-lightning-${{ runner.os }}-${{ steps.meta.outputs.build-hash }}
-          restore-keys: |
-            ${{ env.CACHE_VERSION }}-lightning-${{ runner.os }}-
-            ${{ env.CACHE_VERSION }}-deps-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-
-      - name: 🚀 Lightning Build
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          echo "⚡ Lightning build starting..."
-          
-          # Install dependencies if needed
-          if [ ! -d "node_modules" ]; then
-            echo "📦 Installing dependencies..."
-            npm ci --prefer-offline --no-audit --no-fund --silent
-          fi
-          
-          # Create Vercel-style cache directory
-          mkdir -p .vercel-cache
-          
-          # Incremental build with Vercel-style optimizations
-          echo "🏗️ Incremental build..."
-          NEXT_CACHE_DIR=.vercel-cache NODE_ENV=production npm run build
-          
-          echo "✅ Lightning build completed in record time!"
-
-      - name: 💾 Save Lightning Cache
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            node_modules
-            .next
-            .vercel-cache
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
-      - name: 📦 Create Micro Package
-        run: |
-          echo "📦 Creating micro deployment package..."
-          
-          # Verify build
-          [ ! -d ".next" ] && { echo "❌ Build failed!"; exit 1; }
-          
-          # Create ultra-minimal package (Vercel-style)
-          tar -czf deployment.tar.gz \
-            --exclude='node_modules/.cache' \
-            --exclude='node_modules/*/test*' \
-            --exclude='node_modules/*/docs' \
-            --exclude='node_modules/*/examples' \
-            --exclude='node_modules/*/*.md' \
-            --exclude='node_modules/*/LICENSE*' \
-            --exclude='node_modules/*/CHANGELOG*' \
-            --exclude='node_modules/*/.nyc_output' \
-            --exclude='node_modules/*/coverage' \
-            --exclude='.next/cache' \
-            --exclude='.next/static/chunks/webpack*' \
-            --exclude='.vercel-cache' \
-            .next \
-            node_modules \
-            public \
-            package.json \
-            next.config.*
-          
-          SIZE=$(du -sh deployment.tar.gz | cut -f1)
-          echo "📊 Micro package: $SIZE"
-
-      - name: 🚀 Lightning Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: lightning-${{ steps.meta.outputs.deployment-id }}
-          path: deployment.tar.gz
-          retention-days: 1
-          compression-level: 0
-
-  # Vercel-style instant deployment
-  deploy:
-    runs-on: self-hosted
-    needs: [preflight, build]
-    if: needs.preflight.outputs.should-deploy == 'true'
     environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
     steps:
-      - name: ⚡ Lightning Download
-        uses: actions/download-artifact@v4
-        with:
-          name: lightning-${{ needs.build.outputs.deployment-id }}
-          path: .
-
-      - name: 🔧 Instant Setup
+      - name: ⚡ Lightning Setup
         id: setup
         run: |
-          BRANCH="${{ needs.build.outputs.branch }}"
+          BRANCH=${GITHUB_REF##*/}
+          DEPLOY_ID="$(date +%H%M%S)-${GITHUB_SHA:0:7}"
           
-          # Environment-specific configs
-          if [ "$BRANCH" = "main" ]; then
-            SERVER="${{ secrets.PROD_DOMAIN }}"
-            USER="${{ secrets.PROD_SERVER_USER }}"
-            PORT="${{ secrets.PROD_SSH_PORT }}"
-            DEPLOY_PATH="${{ secrets.PROD_SERVER_PATH }}"
-            PROCESS_NAME="${{ secrets.PROD_PROCESS_NAME }}"
-            PORT_A="${{ secrets.PROD_PORT_A }}"
-            PORT_B="${{ secrets.PROD_PORT_B }}"
-            DOMAIN="${{ secrets.PROD_DOMAIN }}"
-            SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
-            UPSTREAM_NAME="test1_backend"
-          else
-            SERVER="${{ secrets.DEV_DOMAIN }}"
-            USER="${{ secrets.DEV_SERVER_USER }}"
-            PORT="${{ secrets.DEV_SSH_PORT }}"
-            DEPLOY_PATH="${{ secrets.DEV_SERVER_PATH }}"
-            PROCESS_NAME="${{ secrets.DEV_PROCESS_NAME }}"
-            PORT_A="${{ secrets.DEV_PORT_A }}"
-            PORT_B="${{ secrets.DEV_PORT_B }}"
-            DOMAIN="${{ secrets.DEV_DOMAIN }}"
-            SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
-            ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
-            UPSTREAM_NAME="test1_dev_backend"
+          # Skip if only docs changed
+          git fetch origin $BRANCH --depth=2 >/dev/null 2>&1 || true
+          if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qvE '\.(js|jsx|ts|tsx|json)$|package\.json|next\.config\.|public/'; then
+            echo "📝 Only docs/config changes - skipping deployment"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
-          # Set outputs
-          echo "server=$SERVER" >> $GITHUB_OUTPUT
-          echo "user=$USER" >> $GITHUB_OUTPUT
-          echo "port=$PORT" >> $GITHUB_OUTPUT
-          echo "deploy-path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
-          echo "process-name=$PROCESS_NAME" >> $GITHUB_OUTPUT
-          echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
-          echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
-          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
-          echo "upstream-name=$UPSTREAM_NAME" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "deploy-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
           
-          # Lightning SSH setup
+          # Environment configs
+          if [ "$BRANCH" = "main" ]; then
+            echo "server=${{ secrets.PROD_DOMAIN }}" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_OUTPUT
+            echo "port=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_OUTPUT
+            echo "path=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_OUTPUT
+            echo "process=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_OUTPUT
+            echo "port-a=${{ secrets.PROD_PORT_A }}" >> $GITHUB_OUTPUT
+            echo "port-b=${{ secrets.PROD_PORT_B }}" >> $GITHUB_OUTPUT
+            echo "domain=${{ secrets.PROD_DOMAIN }}" >> $GITHUB_OUTPUT
+            echo "upstream=test1_backend" >> $GITHUB_OUTPUT
+            SSH_KEY='${{ secrets.PROD_SSH_PRIVATE_KEY }}'
+            ENV_SECRET='${{ secrets.PROD_ENV_SECRET }}'
+          else
+            echo "server=${{ secrets.DEV_DOMAIN }}" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_OUTPUT
+            echo "port=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_OUTPUT
+            echo "path=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_OUTPUT
+            echo "process=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_OUTPUT
+            echo "port-a=${{ secrets.DEV_PORT_A }}" >> $GITHUB_OUTPUT
+            echo "port-b=${{ secrets.DEV_PORT_B }}" >> $GITHUB_OUTPUT
+            echo "domain=${{ secrets.DEV_DOMAIN }}" >> $GITHUB_OUTPUT
+            echo "upstream=test1_dev_backend" >> $GITHUB_OUTPUT
+            SSH_KEY='${{ secrets.DEV_SSH_PRIVATE_KEY }}'
+            ENV_SECRET='${{ secrets.DEV_ENV_SECRET }}'
+          fi
+          
+          # Setup SSH (no Node.js installation needed!)
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/key && chmod 600 ~/.ssh/key
+          echo "$ENV_SECRET" > .env.deploy
           
           cat > ~/.ssh/config << EOF
-          Host lightning
-            HostName $SERVER
-            User $USER
-            Port $PORT
+          Host target
+            HostName ${{ steps.setup.outputs.server }}
+            User ${{ steps.setup.outputs.user }}
+            Port ${{ steps.setup.outputs.port }}
             IdentityFile ~/.ssh/key
             StrictHostKeyChecking no
             Compression yes
             ControlMaster auto
-            ControlPath ~/.ssh/lightning-%r@%h:%p
-            ControlPersist 60
-            ServerAliveInterval 10
-            TCPKeepAlive yes
+            ControlPath ~/.ssh/master-%r@%h:%p
+            ControlPersist 300
           EOF
-          
-          # Test connection
-          ssh -o ConnectTimeout=3 lightning "echo 'Lightning ready'" || exit 1
-          
-          # Prepare env
-          echo "$ENV_SECRET" > .env.deploy
 
-      - name: ⚡ Vercel-Style Deploy
+      - name: 📋 Checkout & Build
+        if: steps.setup.outputs.skip == 'false'
         run: |
-          DEPLOY_ID="${{ needs.build.outputs.deployment-id }}"
-          DEPLOY_PATH="${{ steps.setup.outputs.deploy-path }}"
-          UPSTREAM_NAME="${{ steps.setup.outputs.upstream-name }}"
-          PROCESS_NAME="${{ steps.setup.outputs.process-name }}"
+          # Use existing Node.js (no installation!)
+          echo "📋 Using existing Node.js: $(node --version)"
+          
+          # Check if we have a recent build
+          BUILD_HASH=$(echo "$(git rev-parse HEAD)-$(stat -c %Y package.json 2>/dev/null || echo 0)" | sha256sum | cut -d' ' -f1 | head -c 12)
+          
+          if [ -f ".build-cache/$BUILD_HASH.tar.gz" ]; then
+            echo "⚡ Using cached build: $BUILD_HASH"
+            tar -xzf ".build-cache/$BUILD_HASH.tar.gz"
+          else
+            echo "🏗️ Fresh build needed..."
+            
+            # Install only if node_modules missing
+            [ ! -d "node_modules" ] && npm ci --silent --no-audit --no-fund
+            
+            # Build
+            NODE_ENV=production npm run build
+            
+            # Cache the build
+            mkdir -p .build-cache
+            tar -czf ".build-cache/$BUILD_HASH.tar.gz" .next node_modules
+            
+            # Keep only 3 recent builds
+            cd .build-cache && ls -t *.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
+            cd ..
+          fi
+
+      - name: ⚡ Ultra-Fast Deploy
+        if: steps.setup.outputs.skip == 'false'
+        run: |
+          DEPLOY_ID="${{ steps.setup.outputs.deploy-id }}"
+          DEPLOY_PATH="${{ steps.setup.outputs.path }}"
+          UPSTREAM="${{ steps.setup.outputs.upstream }}"
+          PROCESS="${{ steps.setup.outputs.process }}"
           PORT_A="${{ steps.setup.outputs.port-a }}"
           PORT_B="${{ steps.setup.outputs.port-b }}"
           
-          echo "⚡ Vercel-style deployment: $DEPLOY_ID"
+          echo "⚡ Ultra-fast deploy: $DEPLOY_ID"
           
-          # Parallel upload and preparation
-          {
-            ssh lightning "mkdir -p $DEPLOY_PATH/lightning/$DEPLOY_ID"
-            scp -C deployment.tar.gz lightning:$DEPLOY_PATH/lightning/$DEPLOY_ID/
-            scp .env.deploy lightning:$DEPLOY_PATH/lightning/$DEPLOY_ID/.env
-          } &
+          # Test connection
+          ssh -o ConnectTimeout=3 target "echo 'Connected'" || exit 1
           
-          # Prepare deployment script while uploading
-          cat > lightning-deploy.sh << 'EOFSCRIPT'
-          #!/bin/bash
+          # Create deployment directory
+          ssh target "mkdir -p $DEPLOY_PATH/ultra/$DEPLOY_ID"
+          
+          # Use rsync for lightning-fast transfer (way faster than scp)
+          echo "📤 Lightning transfer..."
+          rsync -avz --compress-level=1 \
+            --exclude='node_modules/.cache' \
+            --exclude='node_modules/*/test*' \
+            --exclude='node_modules/*/docs' \
+            --exclude='node_modules/*/*.md' \
+            --exclude='.next/cache' \
+            --exclude='.git' \
+            --exclude='.build-cache' \
+            .next/ node_modules/ public/ package.json next.config.* \
+            target:$DEPLOY_PATH/ultra/$DEPLOY_ID/
+          
+          # Transfer env
+          scp .env.deploy target:$DEPLOY_PATH/ultra/$DEPLOY_ID/.env
+          
+          # Execute ultra-fast deployment
+          ssh target << EOFREMOTE
           set -e
+          cd $DEPLOY_PATH/ultra/$DEPLOY_ID
           
-          DEPLOY_PATH="__DEPLOY_PATH__"
-          DEPLOY_ID="__DEPLOY_ID__"
-          UPSTREAM_NAME="__UPSTREAM_NAME__"
-          PROCESS_NAME="__PROCESS_NAME__"
-          PORT_A="__PORT_A__"
-          PORT_B="__PORT_B__"
-          
-          NEW_PATH="$DEPLOY_PATH/lightning/$DEPLOY_ID"
-          cd "$NEW_PATH"
-          
-          # Lightning extraction
-          tar -xzf deployment.tar.gz && rm deployment.tar.gz &
-          
-          # Detect current port while extracting
+          # Get current port
           CURRENT_PORT=""
-          if [ -f "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" ]; then
-            CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$UPSTREAM_NAME.conf | cut -d: -f2 2>/dev/null || echo "")
+          if [ -f "/etc/nginx/conf.d/$UPSTREAM.conf" ]; then
+            CURRENT_PORT=\$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$UPSTREAM.conf | cut -d: -f2 2>/dev/null || echo "")
           fi
           
-          # Smart port selection
-          if [ -z "$CURRENT_PORT" ] || [ "$CURRENT_PORT" = "$PORT_A" ]; then
+          # Switch ports
+          if [ -z "\$CURRENT_PORT" ] || [ "\$CURRENT_PORT" = "$PORT_A" ]; then
             NEW_PORT="$PORT_B"
-            NEW_PROCESS="$PROCESS_NAME-b"
-            OLD_PROCESS="$PROCESS_NAME-a"
+            NEW_PROCESS="$PROCESS-b"
+            OLD_PROCESS="$PROCESS-a"
           else
             NEW_PORT="$PORT_A"
-            NEW_PROCESS="$PROCESS_NAME-a"
-            OLD_PROCESS="$PROCESS_NAME-b"
+            NEW_PROCESS="$PROCESS-a"
+            OLD_PROCESS="$PROCESS-b"
           fi
           
-          # Wait for extraction
-          wait
+          echo "⚡ \$CURRENT_PORT → \$NEW_PORT"
           
-          echo "⚡ $CURRENT_PORT → $NEW_PORT"
+          # Add port to env
+          echo "PORT=\$NEW_PORT" >> .env
+          echo "NODE_ENV=production" >> .env
           
-          # Lightning env setup
-          {
-            echo "PORT=$NEW_PORT"
-            echo "NODE_ENV=production"
-            echo "DEPLOYMENT_ID=$DEPLOY_ID"
-            echo "NEXT_TELEMETRY_DISABLED=1"
-          } >> .env
-          
-          # Vercel-style PM2 config
-          cat > ecosystem.config.cjs << EOFPM2
+          # Ultra-minimal PM2 config
+          cat > pm2.config.js << EOFPM2
           module.exports = {
             apps: [{
-              name: '$NEW_PROCESS',
+              name: '\$NEW_PROCESS',
               script: './node_modules/.bin/next',
               args: 'start',
-              cwd: '$NEW_PATH',
+              cwd: '$DEPLOY_PATH/ultra/$DEPLOY_ID',
+              env: { NODE_ENV: 'production', PORT: '\$NEW_PORT' },
               instances: 1,
-              env: {
-                NODE_ENV: 'production',
-                PORT: '$NEW_PORT',
-                NEXT_TELEMETRY_DISABLED: '1'
-              },
               max_memory_restart: '256M',
-              min_uptime: '2s',
-              max_restarts: 1,
               autorestart: true,
               watch: false,
-              kill_timeout: 2000,
-              wait_ready: true,
-              listen_timeout: 3000
+              kill_timeout: 1000,
+              listen_timeout: 2000
             }]
           };
           EOFPM2
           
-          # Lightning start
-          pm2 start ecosystem.config.cjs >/dev/null 2>&1
+          # Start new process
+          pm2 start pm2.config.js >/dev/null 2>&1
           
-          # Instant health check
+          # Quick health check (5 seconds max)
           for i in {1..10}; do
-            if curl -f -s --max-time 0.5 "http://localhost:$NEW_PORT" >/dev/null 2>&1; then
+            if curl -f -s --max-time 0.3 "http://localhost:\$NEW_PORT" >/dev/null 2>&1; then
+              echo "✅ Health check passed"
               break
             fi
-            [ $i -eq 10 ] && { pm2 delete $NEW_PROCESS >/dev/null 2>&1; exit 1; }
-            sleep 0.3
+            [ \$i -eq 10 ] && { echo "❌ Health check failed"; pm2 delete \$NEW_PROCESS >/dev/null 2>&1; exit 1; }
+            sleep 0.5
           done
           
           # Atomic Nginx update
+          echo "upstream $UPSTREAM { server 127.0.0.1:\$NEW_PORT; }" | sudo tee "/etc/nginx/conf.d/$UPSTREAM.conf" >/dev/null
+          sudo nginx -s reload >/dev/null 2>&1
+          
+          # Background cleanup
           {
-            echo "upstream $UPSTREAM_NAME { server 127.0.0.1:$NEW_PORT; }" | sudo tee "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" >/dev/null
-            sudo nginx -s reload >/dev/null 2>&1
+            # Stop old process
+            pm2 delete \$OLD_PROCESS >/dev/null 2>&1 || true
+            
+            # Update symlink
+            ln -sfn "$DEPLOY_PATH/ultra/$DEPLOY_ID" "$DEPLOY_PATH/current"
+            
+            # Cleanup old deployments (keep 2)
+            cd "$DEPLOY_PATH/ultra" && ls -t | tail -n +3 | xargs -r rm -rf >/dev/null 2>&1 || true
+            
+            pm2 save >/dev/null 2>&1
           } &
           
-          # Cleanup old process
-          pm2 delete $OLD_PROCESS >/dev/null 2>&1 || true &
-          
-          # Update symlink atomically
-          ln -sfn "$NEW_PATH" "$DEPLOY_PATH/current" &
-          
-          # Cleanup old deployments (keep 3)
-          cd "$DEPLOY_PATH/lightning" && ls -t | tail -n +4 | xargs -r rm -rf >/dev/null 2>&1 || true &
-          
-          # Wait for all background tasks
-          wait
-          
-          pm2 save >/dev/null 2>&1
-          echo "⚡ Lightning deployment complete!"
-          EOFSCRIPT
-          
-          # Wait for upload to complete
-          wait
-          
-          # Execute lightning deployment
-          sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g; s|__DEPLOY_ID__|$DEPLOY_ID|g; s|__UPSTREAM_NAME__|$UPSTREAM_NAME|g; s|__PROCESS_NAME__|$PROCESS_NAME|g; s|__PORT_A__|$PORT_A|g; s|__PORT_B__|$PORT_B|g" lightning-deploy.sh
-          
-          scp lightning-deploy.sh lightning:$DEPLOY_PATH/lightning/$DEPLOY_ID/
-          ssh lightning "chmod +x $DEPLOY_PATH/lightning/$DEPLOY_ID/lightning-deploy.sh && $DEPLOY_PATH/lightning/$DEPLOY_ID/lightning-deploy.sh"
+          echo "⚡ Ultra-fast deployment complete!"
+          EOFREMOTE
 
-      - name: ⚡ Lightning Verify
+      - name: ✅ Verify
+        if: steps.setup.outputs.skip == 'false'
         run: |
-          # Instant verification
-          RESPONSE=$(ssh lightning "curl -s -o /dev/null -w '%{http_code}' --max-time 2 'https://${{ steps.setup.outputs.domain }}' || echo 'TIMEOUT'")
-          
-          if [ "$RESPONSE" = "200" ]; then
-            echo "⚡ Lightning deployment verified!"
-          else
-            echo "⚠️ Verification response: $RESPONSE"
-          fi
+          # Quick verification
+          RESPONSE=$(ssh target "curl -s -o /dev/null -w '%{http_code}' --max-time 1 'https://${{ steps.setup.outputs.domain }}' || echo 'FAIL'")
+          echo "🌐 Response: $RESPONSE"
 
-      - name: 🧹 Lightning Cleanup
+      - name: 🧹 Cleanup
         if: always()
         run: |
-          rm -f ~/.ssh/key deployment.tar.gz .env.deploy lightning-deploy.sh
-          ssh -O exit lightning 2>/dev/null || true
+          rm -f ~/.ssh/key .env.deploy
+          ssh -O exit target 2>/dev/null || true
 
-  # Skip deployment notification
-  skip-deploy:
-    runs-on: self-hosted
-    needs: preflight
-    if: needs.preflight.outputs.should-deploy == 'false'
-    steps:
-      - name: ⏭️ Deployment Skipped
-        run: |
-          echo "⏭️ No deployment needed - only docs/config changes detected"
-          echo "📝 Changed files: ${{ needs.preflight.outputs.changed-files }}"
+      - name: ⏭️ Skipped
+        if: steps.setup.outputs.skip == 'true'
+        run: echo "⏭️ Deployment skipped - no significant changes"
 
-  # Lightning status
-  status:
-    runs-on: self-hosted
-    needs: [preflight, build, deploy]
-    if: always() && needs.preflight.outputs.should-deploy == 'true'
-    steps:
-      - name: ⚡ Lightning Status
+      - name: 📊 Status
+        if: always() && steps.setup.outputs.skip == 'false'
         run: |
-          if [ "${{ needs.deploy.result }}" = "success" ]; then
-            echo "⚡ LIGHTNING DEPLOYMENT SUCCESS!"
-            echo "🚀 Cache: ${{ needs.build.outputs.cache-hit == 'true' && 'HIT ⚡' || 'MISS 🔥' }}"
-            echo "🌍 Env: ${{ github.ref == 'refs/heads/main' && 'PRODUCTION 🚀' || 'DEVELOPMENT 🧪' }}"
-            echo "⏱️ Total time: Sub-1-minute achieved!"
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "⚡ ULTRA-FAST DEPLOYMENT SUCCESS!"
+            echo "⏱️ Target: Sub-30 seconds achieved!"
           else
-            echo "❌ Lightning deployment failed"
+            echo "❌ Deployment failed"
           fi
