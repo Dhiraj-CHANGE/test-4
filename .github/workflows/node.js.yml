@@ -18,55 +18,88 @@ jobs:
           BRANCH=${GITHUB_REF##*/}
           DEPLOY_ID="$(date +%H%M%S)-${GITHUB_SHA:0:7}"
           
-          # Skip if only docs changed
-          git fetch origin $BRANCH --depth=2 >/dev/null 2>&1 || true
-          if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qvE '\.(js|jsx|ts|tsx|json)$|package\.json|next\.config\.|public/'; then
-            echo "📝 Only docs/config changes - skipping deployment"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          echo "🌿 Branch: $BRANCH | 🆔 Deploy ID: $DEPLOY_ID"
           
-          echo "skip=false" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "deploy-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
-          
-          # Environment configs
+          # Environment configs - set variables directly
           if [ "$BRANCH" = "main" ]; then
-            echo "server=${{ secrets.PROD_DOMAIN }}" >> $GITHUB_OUTPUT
-            echo "user=${{ secrets.PROD_SERVER_USER }}" >> $GITHUB_OUTPUT
-            echo "port=${{ secrets.PROD_SSH_PORT }}" >> $GITHUB_OUTPUT
-            echo "path=${{ secrets.PROD_SERVER_PATH }}" >> $GITHUB_OUTPUT
-            echo "process=${{ secrets.PROD_PROCESS_NAME }}" >> $GITHUB_OUTPUT
-            echo "port-a=${{ secrets.PROD_PORT_A }}" >> $GITHUB_OUTPUT
-            echo "port-b=${{ secrets.PROD_PORT_B }}" >> $GITHUB_OUTPUT
-            echo "domain=${{ secrets.PROD_DOMAIN }}" >> $GITHUB_OUTPUT
-            echo "upstream=test1_backend" >> $GITHUB_OUTPUT
+            SERVER="${{ secrets.PROD_DOMAIN }}"
+            USER="${{ secrets.PROD_SERVER_USER }}"
+            PORT="${{ secrets.PROD_SSH_PORT }}"
+            DEPLOY_PATH="${{ secrets.PROD_SERVER_PATH }}"
+            PROCESS_NAME="${{ secrets.PROD_PROCESS_NAME }}"
+            PORT_A="${{ secrets.PROD_PORT_A }}"
+            PORT_B="${{ secrets.PROD_PORT_B }}"
+            DOMAIN="${{ secrets.PROD_DOMAIN }}"
+            UPSTREAM="test1_backend"
             SSH_KEY='${{ secrets.PROD_SSH_PRIVATE_KEY }}'
             ENV_SECRET='${{ secrets.PROD_ENV_SECRET }}'
           else
-            echo "server=${{ secrets.DEV_DOMAIN }}" >> $GITHUB_OUTPUT
-            echo "user=${{ secrets.DEV_SERVER_USER }}" >> $GITHUB_OUTPUT
-            echo "port=${{ secrets.DEV_SSH_PORT }}" >> $GITHUB_OUTPUT
-            echo "path=${{ secrets.DEV_SERVER_PATH }}" >> $GITHUB_OUTPUT
-            echo "process=${{ secrets.DEV_PROCESS_NAME }}" >> $GITHUB_OUTPUT
-            echo "port-a=${{ secrets.DEV_PORT_A }}" >> $GITHUB_OUTPUT
-            echo "port-b=${{ secrets.DEV_PORT_B }}" >> $GITHUB_OUTPUT
-            echo "domain=${{ secrets.DEV_DOMAIN }}" >> $GITHUB_OUTPUT
-            echo "upstream=test1_dev_backend" >> $GITHUB_OUTPUT
+            SERVER="${{ secrets.DEV_DOMAIN }}"
+            USER="${{ secrets.DEV_SERVER_USER }}"
+            PORT="${{ secrets.DEV_SSH_PORT }}"
+            DEPLOY_PATH="${{ secrets.DEV_SERVER_PATH }}"
+            PROCESS_NAME="${{ secrets.DEV_PROCESS_NAME }}"
+            PORT_A="${{ secrets.DEV_PORT_A }}"
+            PORT_B="${{ secrets.DEV_PORT_B }}"
+            DOMAIN="${{ secrets.DEV_DOMAIN }}"
+            UPSTREAM="test1_dev_backend"
             SSH_KEY='${{ secrets.DEV_SSH_PRIVATE_KEY }}'
             ENV_SECRET='${{ secrets.DEV_ENV_SECRET }}'
           fi
           
-          # Setup SSH (no Node.js installation needed!)
+          # Validate required variables
+          echo "🔍 Validating configuration..."
+          echo "  - SERVER: ${SERVER:-MISSING}"
+          echo "  - USER: ${USER:-MISSING}"
+          echo "  - PORT: ${PORT:-22}"
+          echo "  - DEPLOY_PATH: ${DEPLOY_PATH:-MISSING}"
+          echo "  - PROCESS_NAME: ${PROCESS_NAME:-MISSING}"
+          echo "  - UPSTREAM: $UPSTREAM"
+          
+          if [ -z "$SERVER" ] || [ -z "$USER" ] || [ -z "$DEPLOY_PATH" ] || [ -z "$PROCESS_NAME" ]; then
+            echo "❌ Missing required configuration!"
+            exit 1
+          fi
+          
+          # Default SSH port if not set
+          PORT=${PORT:-22}
+          
+          # Set outputs for next steps
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "deploy-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          echo "user=$USER" >> $GITHUB_OUTPUT
+          echo "port=$PORT" >> $GITHUB_OUTPUT
+          echo "path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
+          echo "process=$PROCESS_NAME" >> $GITHUB_OUTPUT
+          echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
+          echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+          echo "upstream=$UPSTREAM" >> $GITHUB_OUTPUT
+          
+          # Set environment variables for this job
+          echo "SERVER=$SERVER" >> $GITHUB_ENV
+          echo "USER=$USER" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=$DEPLOY_PATH" >> $GITHUB_ENV
+          echo "PROCESS_NAME=$PROCESS_NAME" >> $GITHUB_ENV
+          echo "PORT_A=$PORT_A" >> $GITHUB_ENV
+          echo "PORT_B=$PORT_B" >> $GITHUB_ENV
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
+          echo "UPSTREAM=$UPSTREAM" >> $GITHUB_ENV
+          echo "DEPLOY_ID=$DEPLOY_ID" >> $GITHUB_ENV
+          
+          # Setup SSH with validated variables
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/key && chmod 600 ~/.ssh/key
           echo "$ENV_SECRET" > .env.deploy
           
+          # Create SSH config with actual values
           cat > ~/.ssh/config << EOF
           Host target
-            HostName ${{ steps.setup.outputs.server }}
-            User ${{ steps.setup.outputs.user }}
-            Port ${{ steps.setup.outputs.port }}
+            HostName $SERVER
+            User $USER
+            Port $PORT
             IdentityFile ~/.ssh/key
             StrictHostKeyChecking no
             Compression yes
@@ -74,10 +107,19 @@ jobs:
             ControlPath ~/.ssh/master-%r@%h:%p
             ControlPersist 300
           EOF
+          
+          echo "✅ SSH configuration created"
 
       - name: 📋 Checkout & Build
-        if: steps.setup.outputs.skip == 'false'
         run: |
+          # Skip if only docs changed
+          git fetch origin ${{ steps.setup.outputs.branch }} --depth=2 >/dev/null 2>&1 || true
+          if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qvE '\.(js|jsx|ts|tsx|json)$|package\.json|next\.config\.|public/'; then
+            echo "📝 Only docs/config changes - skipping deployment"
+            echo "SKIP_DEPLOY=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          
           # Use existing Node.js (no installation!)
           echo "📋 Using existing Node.js: $(node --version)"
           
@@ -106,24 +148,18 @@ jobs:
           fi
 
       - name: ⚡ Ultra-Fast Deploy
-        if: steps.setup.outputs.skip == 'false'
+        if: env.SKIP_DEPLOY != 'true'
         run: |
-          DEPLOY_ID="${{ steps.setup.outputs.deploy-id }}"
-          DEPLOY_PATH="${{ steps.setup.outputs.path }}"
-          UPSTREAM="${{ steps.setup.outputs.upstream }}"
-          PROCESS="${{ steps.setup.outputs.process }}"
-          PORT_A="${{ steps.setup.outputs.port-a }}"
-          PORT_B="${{ steps.setup.outputs.port-b }}"
-          
           echo "⚡ Ultra-fast deploy: $DEPLOY_ID"
+          echo "🎯 Target: $SERVER:$PORT"
           
           # Test connection
-          ssh -o ConnectTimeout=3 target "echo 'Connected'" || exit 1
+          ssh -o ConnectTimeout=3 target "echo 'Connected to $(hostname)'" || exit 1
           
           # Create deployment directory
           ssh target "mkdir -p $DEPLOY_PATH/ultra/$DEPLOY_ID"
           
-          # Use rsync for lightning-fast transfer (way faster than scp)
+          # Use rsync for lightning-fast transfer
           echo "📤 Lightning transfer..."
           rsync -avz --compress-level=1 \
             --exclude='node_modules/.cache' \
@@ -144,6 +180,9 @@ jobs:
           set -e
           cd $DEPLOY_PATH/ultra/$DEPLOY_ID
           
+          echo "📂 Current directory: \$(pwd)"
+          echo "📁 Contents: \$(ls -la)"
+          
           # Get current port
           CURRENT_PORT=""
           if [ -f "/etc/nginx/conf.d/$UPSTREAM.conf" ]; then
@@ -153,12 +192,12 @@ jobs:
           # Switch ports
           if [ -z "\$CURRENT_PORT" ] || [ "\$CURRENT_PORT" = "$PORT_A" ]; then
             NEW_PORT="$PORT_B"
-            NEW_PROCESS="$PROCESS-b"
-            OLD_PROCESS="$PROCESS-a"
+            NEW_PROCESS="$PROCESS_NAME-b"
+            OLD_PROCESS="$PROCESS_NAME-a"
           else
             NEW_PORT="$PORT_A"
-            NEW_PROCESS="$PROCESS-a"
-            OLD_PROCESS="$PROCESS-b"
+            NEW_PROCESS="$PROCESS_NAME-a"
+            OLD_PROCESS="$PROCESS_NAME-b"
           fi
           
           echo "⚡ \$CURRENT_PORT → \$NEW_PORT"
@@ -166,6 +205,7 @@ jobs:
           # Add port to env
           echo "PORT=\$NEW_PORT" >> .env
           echo "NODE_ENV=production" >> .env
+          echo "DEPLOYMENT_ID=$DEPLOY_ID" >> .env
           
           # Ultra-minimal PM2 config
           cat > pm2.config.js << EOFPM2
@@ -175,7 +215,11 @@ jobs:
               script: './node_modules/.bin/next',
               args: 'start',
               cwd: '$DEPLOY_PATH/ultra/$DEPLOY_ID',
-              env: { NODE_ENV: 'production', PORT: '\$NEW_PORT' },
+              env: { 
+                NODE_ENV: 'production', 
+                PORT: '\$NEW_PORT',
+                DEPLOYMENT_ID: '$DEPLOY_ID'
+              },
               instances: 1,
               max_memory_restart: '256M',
               autorestart: true,
@@ -187,45 +231,64 @@ jobs:
           EOFPM2
           
           # Start new process
-          pm2 start pm2.config.js >/dev/null 2>&1
+          echo "🚀 Starting \$NEW_PROCESS on port \$NEW_PORT..."
+          pm2 start pm2.config.js
           
           # Quick health check (5 seconds max)
+          echo "🔍 Health check..."
           for i in {1..10}; do
             if curl -f -s --max-time 0.3 "http://localhost:\$NEW_PORT" >/dev/null 2>&1; then
-              echo "✅ Health check passed"
+              echo "✅ Health check passed (attempt \$i)"
               break
             fi
-            [ \$i -eq 10 ] && { echo "❌ Health check failed"; pm2 delete \$NEW_PROCESS >/dev/null 2>&1; exit 1; }
+            [ \$i -eq 10 ] && { 
+              echo "❌ Health check failed after 10 attempts"
+              echo "🔍 PM2 logs:"
+              pm2 logs \$NEW_PROCESS --lines 10
+              pm2 delete \$NEW_PROCESS
+              exit 1
+            }
             sleep 0.5
           done
           
           # Atomic Nginx update
-          echo "upstream $UPSTREAM { server 127.0.0.1:\$NEW_PORT; }" | sudo tee "/etc/nginx/conf.d/$UPSTREAM.conf" >/dev/null
-          sudo nginx -s reload >/dev/null 2>&1
+          echo "🔄 Updating Nginx upstream..."
+          echo "upstream $UPSTREAM { server 127.0.0.1:\$NEW_PORT; }" | sudo tee "/etc/nginx/conf.d/$UPSTREAM.conf"
+          sudo nginx -t && sudo nginx -s reload
           
           # Background cleanup
           {
             # Stop old process
-            pm2 delete \$OLD_PROCESS >/dev/null 2>&1 || true
+            if pm2 describe \$OLD_PROCESS >/dev/null 2>&1; then
+              echo "🛑 Stopping old process: \$OLD_PROCESS"
+              pm2 delete \$OLD_PROCESS
+            fi
             
             # Update symlink
             ln -sfn "$DEPLOY_PATH/ultra/$DEPLOY_ID" "$DEPLOY_PATH/current"
             
             # Cleanup old deployments (keep 2)
-            cd "$DEPLOY_PATH/ultra" && ls -t | tail -n +3 | xargs -r rm -rf >/dev/null 2>&1 || true
+            cd "$DEPLOY_PATH/ultra" && ls -t | tail -n +3 | xargs -r rm -rf || true
             
-            pm2 save >/dev/null 2>&1
+            pm2 save
           } &
           
           echo "⚡ Ultra-fast deployment complete!"
           EOFREMOTE
 
       - name: ✅ Verify
-        if: steps.setup.outputs.skip == 'false'
+        if: env.SKIP_DEPLOY != 'true'
         run: |
           # Quick verification
-          RESPONSE=$(ssh target "curl -s -o /dev/null -w '%{http_code}' --max-time 1 'https://${{ steps.setup.outputs.domain }}' || echo 'FAIL'")
-          echo "🌐 Response: $RESPONSE"
+          echo "🌐 Testing: https://$DOMAIN"
+          RESPONSE=$(ssh target "curl -s -o /dev/null -w '%{http_code}' --max-time 2 'https://$DOMAIN' || echo 'FAIL'")
+          echo "📊 Response: $RESPONSE"
+          
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Deployment verified successfully!"
+          else
+            echo "⚠️ Verification returned: $RESPONSE"
+          fi
 
       - name: 🧹 Cleanup
         if: always()
@@ -234,15 +297,21 @@ jobs:
           ssh -O exit target 2>/dev/null || true
 
       - name: ⏭️ Skipped
-        if: steps.setup.outputs.skip == 'true'
-        run: echo "⏭️ Deployment skipped - no significant changes"
+        if: env.SKIP_DEPLOY == 'true'
+        run: echo "⏭️ Deployment skipped - no significant changes detected"
 
-      - name: 📊 Status
-        if: always() && steps.setup.outputs.skip == 'false'
+      - name: 📊 Final Status
+        if: always()
         run: |
           if [ "${{ job.status }}" = "success" ]; then
-            echo "⚡ ULTRA-FAST DEPLOYMENT SUCCESS!"
-            echo "⏱️ Target: Sub-30 seconds achieved!"
+            if [ "$SKIP_DEPLOY" = "true" ]; then
+              echo "⏭️ DEPLOYMENT SKIPPED - No changes needed"
+            else
+              echo "⚡ ULTRA-FAST DEPLOYMENT SUCCESS!"
+              echo "🎯 Deploy ID: $DEPLOY_ID"
+              echo "🌍 Environment: ${{ github.ref == 'refs/heads/main' && 'PRODUCTION' || 'DEVELOPMENT' }}"
+              echo "⏱️ Target: Sub-30 seconds achieved!"
+            fi
           else
             echo "❌ Deployment failed"
           fi
