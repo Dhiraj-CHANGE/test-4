@@ -34,7 +34,7 @@ export default function Home() {
             .
           </li>
           <li className="tracking-[-.01em]">
-            VERCEL CICD 4
+            VERCEL CICD 5
           </li>
         </ol>
         <div className="flex gap-4 items-center flex-col sm:flex-row">
