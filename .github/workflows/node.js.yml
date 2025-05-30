@@ -260,41 +260,24 @@ jobs:
             exit 1
           fi
 
-      - name: 🔍 Analyze Nginx Configuration
-        id: nginx-analyze
+      - name: 🔧 Clean PM2 State
         run: |
-          BRANCH="${{ needs.build.outputs.branch }}"
-          UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
-          SITE_CONFIG_PATH="${{ steps.env-setup.outputs.site-config-path }}"
-          
-          echo "🔍 Analyzing Nginx configuration..."
-          
-          # Check if site config exists
-          SITE_CONFIG_EXISTS=$(ssh deploy "[ -f \"$SITE_CONFIG_PATH\" ] && echo 'yes' || echo 'no'")
-          
-          if [ "$SITE_CONFIG_EXISTS" = "yes" ]; then
-            echo "✅ Site configuration found at $SITE_CONFIG_PATH"
+          echo "🧹 Cleaning PM2 state and synchronizing..."
+          ssh deploy << 'CLEAN_SCRIPT'
+            # Stop any orphaned processes
+            pm2 delete all 2>/dev/null || true
             
-            # Check what upstream name is currently used in the site config
-            CURRENT_UPSTREAM=$(ssh deploy "grep -o 'upstream[[:space:]]*[^[:space:]]*' $SITE_CONFIG_PATH | head -1 | awk '{print \$2}'")
+            # Clear PM2 state
+            pm2 kill
             
-            echo "🔍 Current upstream name in site config: $CURRENT_UPSTREAM"
+            # Start PM2 daemon fresh
+            pm2 ping
             
-            # Check if we need to update the site config
-            if [ "$CURRENT_UPSTREAM" != "$UPSTREAM_NAME" ]; then
-              echo "⚠️ Site config uses '$CURRENT_UPSTREAM' but we want to use '$UPSTREAM_NAME'"
-              NEEDS_UPDATE="yes"
-            else
-              echo "✅ Site config already uses the correct upstream name: $UPSTREAM_NAME"
-              NEEDS_UPDATE="no"
-            fi
-          else
-            echo "❌ Site configuration not found at $SITE_CONFIG_PATH"
-            NEEDS_UPDATE="no"
-          fi
-          
-          echo "needs-update=$NEEDS_UPDATE" >> $GITHUB_OUTPUT
-          echo "current-upstream=$CURRENT_UPSTREAM" >> $GITHUB_OUTPUT
+            # Remove any stale ecosystem files
+            find /tmp -name "ecosystem.config.*" -delete 2>/dev/null || true
+            
+            echo "✅ PM2 state cleaned"
+          CLEAN_SCRIPT
 
       - name: 🧹 Clean Old Deployments First
         run: |
@@ -308,8 +291,6 @@ jobs:
           BRANCH="${{ needs.build.outputs.branch }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
           SITE_CONFIG_PATH="${{ steps.env-setup.outputs.site-config-path }}"
-          CURRENT_UPSTREAM="${{ steps.nginx-analyze.outputs.current-upstream }}"
-          NEEDS_UPDATE="${{ steps.nginx-analyze.outputs.needs-update }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
           PORT_A="${{ steps.env-setup.outputs.port-a }}"
@@ -321,8 +302,6 @@ jobs:
           echo "  - BRANCH: $BRANCH"
           echo "  - UPSTREAM_NAME: $UPSTREAM_NAME"
           echo "  - SITE_CONFIG_PATH: $SITE_CONFIG_PATH"
-          echo "  - CURRENT_UPSTREAM: $CURRENT_UPSTREAM"
-          echo "  - NEEDS_UPDATE: $NEEDS_UPDATE"
           echo "  - DEPLOY_PATH: $DEPLOY_PATH"
           echo "  - PROCESS_NAME: $PROCESS_NAME"
           echo "  - PORT_A: $PORT_A"
@@ -356,8 +335,6 @@ jobs:
           DEPLOYMENT_ID="__DEPLOYMENT_ID__"
           UPSTREAM_NAME="__UPSTREAM_NAME__"
           SITE_CONFIG_PATH="__SITE_CONFIG_PATH__"
-          CURRENT_UPSTREAM="__CURRENT_UPSTREAM__"
-          NEEDS_UPDATE="__NEEDS_UPDATE__"
           PROCESS_NAME="__PROCESS_NAME__"
           PORT_A="__PORT_A__"
           PORT_B="__PORT_B__"
@@ -374,8 +351,6 @@ jobs:
           echo "📂 Staging: $STAGING_PATH"
           echo "🔧 Upstream name: $UPSTREAM_NAME"
           echo "🔧 Site config path: $SITE_CONFIG_PATH"
-          echo "🔧 Current upstream in site config: $CURRENT_UPSTREAM"
-          echo "🔧 Needs site config update: $NEEDS_UPDATE"
           echo "🌿 Branch: $BRANCH"
           
           # Create directories
@@ -396,46 +371,10 @@ jobs:
           echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
           echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
           
-          # Smart detection of deployment type
-          FIRST_DEPLOYMENT=false
-          OLD_PROCESS=""
-          CURRENT_PORT=""
-          
-          # Check for existing processes with our process name pattern
-          EXISTING_PROCESSES=$(pm2 list | grep "$PROCESS_NAME" | grep "online" || true)
-          
-          if [ -z "$EXISTING_PROCESSES" ]; then
-            echo "🎯 No running processes found - First deployment or recovery"
-            FIRST_DEPLOYMENT=true
-          else
-            echo "🔄 Found existing processes - Regular update"
-            # Get current port from existing upstream config
-            if [ -f "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" ]; then
-              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$UPSTREAM_NAME.conf | cut -d: -f2)
-              echo "📍 Current Nginx port: $CURRENT_PORT"
-            fi
-          fi
-          
-          # Determine ports and processes
-          if [ "$FIRST_DEPLOYMENT" = true ]; then
-            NEW_PORT="$PORT_A"
-            NEW_PROCESS="$PROCESS_NAME-a"
-            OLD_PROCESS=""
-            echo "🚀 First deployment: Using port $NEW_PORT with process $NEW_PROCESS"
-          else
-            # Switch ports for zero-downtime
-            if [ "$CURRENT_PORT" = "$PORT_A" ]; then
-              NEW_PORT="$PORT_B"
-              NEW_PROCESS="$PROCESS_NAME-b"
-              OLD_PROCESS="$PROCESS_NAME-a"
-            else
-              NEW_PORT="$PORT_A"
-              NEW_PROCESS="$PROCESS_NAME-a"
-              OLD_PROCESS="$PROCESS_NAME-b"
-            fi
-            echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
-            echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
-          fi
+          # Always use PORT_A for first deployment since we cleaned PM2 state
+          NEW_PORT="$PORT_A"
+          NEW_PROCESS="$PROCESS_NAME-a"
+          echo "🚀 Clean deployment: Using port $NEW_PORT with process $NEW_PROCESS"
           
           # Add environment variables
           echo "PORT=$NEW_PORT" >> .env
@@ -497,22 +436,11 @@ jobs:
           }
           
           # Local health check
-          if [ "$FIRST_DEPLOYMENT" = true ]; then
-            # More lenient for first deployment
-            if ! health_check $NEW_PORT 30 2; then
-              echo "❌ First deployment health check failed"
-              pm2 logs $NEW_PROCESS --lines 50
-              pm2 delete $NEW_PROCESS
-              exit 1
-            fi
-          else
-            # Standard for updates
-            if ! health_check $NEW_PORT 20 1; then
-              echo "❌ Update health check failed"
-              pm2 logs $NEW_PROCESS --lines 20
-              pm2 delete $NEW_PROCESS
-              exit 1
-            fi
+          if ! health_check $NEW_PORT 30 2; then
+            echo "❌ Health check failed"
+            pm2 logs $NEW_PROCESS --lines 50
+            pm2 delete $NEW_PROCESS
+            exit 1
           fi
           
           # Update the upstream configuration
@@ -524,18 +452,26 @@ jobs:
           }
           EOFNGINX
           
-          # If we need to update the site config to use our new upstream name
-          if [ "$NEEDS_UPDATE" = "yes" ] && [ -f "$SITE_CONFIG_PATH" ]; then
-            echo "🔄 Updating site config to use upstream $UPSTREAM_NAME instead of $CURRENT_UPSTREAM..."
+          # CRITICAL FIX: Update the site config to use our upstream name
+          if [ -f "$SITE_CONFIG_PATH" ]; then
+            echo "🔄 Updating site config to use upstream $UPSTREAM_NAME..."
             
             # Create a backup of the original site config
             BACKUP_PATH="${SITE_CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
             sudo cp "$SITE_CONFIG_PATH" "$BACKUP_PATH"
             echo "✅ Created backup of site config at $BACKUP_PATH"
             
-            # Replace the upstream name in the site config
-            sudo sed -i "s/upstream[[:space:]]*$CURRENT_UPSTREAM/upstream $UPSTREAM_NAME/g" "$SITE_CONFIG_PATH"
-            echo "✅ Updated site config to use upstream $UPSTREAM_NAME"
+            # Find and replace ALL upstream references in the site config
+            # This handles both "upstream test1_backend" and "proxy_pass http://test1_backend"
+            sudo sed -i "s/test1_backend/$UPSTREAM_NAME/g" "$SITE_CONFIG_PATH"
+            echo "✅ Updated all references to use upstream $UPSTREAM_NAME"
+            
+            # Show what we changed
+            echo "🔍 Updated site config content (relevant lines):"
+            grep -n "$UPSTREAM_NAME" "$SITE_CONFIG_PATH" || echo "No matches found"
+          else
+            echo "❌ Site config not found at $SITE_CONFIG_PATH"
+            exit 1
           fi
           
           # Test Nginx configuration
@@ -545,21 +481,6 @@ jobs:
             sudo nginx -s reload
             echo "✅ Nginx reloaded successfully"
             sleep 3
-            
-            # Always proceed with deployment since local health check passed
-            echo "✅ Local health check passed, proceeding with deployment"
-            
-            # Stop old process if it exists and this is an update
-            if [ "$FIRST_DEPLOYMENT" = false ] && [ -n "$OLD_PROCESS" ]; then
-              if pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
-                echo "🛑 Stopping old process: $OLD_PROCESS"
-                pm2 stop $OLD_PROCESS
-                sleep 1
-                pm2 delete $OLD_PROCESS
-              else
-                echo "ℹ️ Old process $OLD_PROCESS not found (already stopped)"
-              fi
-            fi
             
             # Update symlinks and staging
             echo "🔄 Updating symlinks..."
@@ -589,10 +510,10 @@ jobs:
             echo "📂 Files in /etc/nginx/sites-enabled/:"
             ls -la /etc/nginx/sites-enabled/ || true
             echo "🔍 Checking for conflicting upstream definitions..."
-            grep -r "upstream.*$UPSTREAM_NAME" /etc/nginx/ || true
+            grep -r "upstream.*test1" /etc/nginx/ || true
             
-            # If we modified the site config and it failed, restore the backup
-            if [ "$NEEDS_UPDATE" = "yes" ] && [ -f "$BACKUP_PATH" ]; then
+            # Restore the backup if we modified the site config
+            if [ -f "$BACKUP_PATH" ]; then
               echo "🔄 Restoring site config from backup..."
               sudo cp "$BACKUP_PATH" "$SITE_CONFIG_PATH"
               echo "✅ Restored site config from backup"
@@ -608,8 +529,6 @@ jobs:
           sed -i "s|__DEPLOYMENT_ID__|$DEPLOY_DIR|g" deploy_script.sh
           sed -i "s|__UPSTREAM_NAME__|$UPSTREAM_NAME|g" deploy_script.sh
           sed -i "s|__SITE_CONFIG_PATH__|$SITE_CONFIG_PATH|g" deploy_script.sh
-          sed -i "s|__CURRENT_UPSTREAM__|$CURRENT_UPSTREAM|g" deploy_script.sh
-          sed -i "s|__NEEDS_UPDATE__|$NEEDS_UPDATE|g" deploy_script.sh
           sed -i "s|__PROCESS_NAME__|$PROCESS_NAME|g" deploy_script.sh
           sed -i "s|__PORT_A__|$PORT_A|g" deploy_script.sh
           sed -i "s|__PORT_B__|$PORT_B|g" deploy_script.sh
@@ -631,7 +550,7 @@ jobs:
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
-            pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
+            pm2 status
             
             echo ""
             echo "🔧 Nginx Upstream Config:"
