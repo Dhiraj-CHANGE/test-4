@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v2'  # Bumped version to invalidate old cache
+  CACHE_VERSION: 'v3'  # Bumped version
 
 jobs:
   build:
@@ -14,7 +14,15 @@ jobs:
     outputs:
       deployment-id: ${{ steps.meta.outputs.deployment-id }}
       cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
+      branch: ${{ steps.branch.outputs.branch }}
     steps:
+      - name: 📋 Get Branch Name
+        id: branch
+        run: |
+          BRANCH=${GITHUB_REF##*/}
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "🌿 Branch: $BRANCH"
+
       - name: 📋 Checkout
         uses: actions/checkout@v4
         with:
@@ -47,7 +55,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: .next
-          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}
+          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ steps.branch.outputs.branch }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}
           restore-keys: |
             ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
 
@@ -113,7 +121,8 @@ jobs:
       - name: ⚙️ Setup Environment Variables
         id: env-setup
         run: |
-          BRANCH=${GITHUB_REF##*/}
+          BRANCH="${{ needs.build.outputs.branch }}"
+          echo "🌿 Branch: $BRANCH"
           
           if [ "$BRANCH" = "main" ]; then
             # Production environment
@@ -127,7 +136,8 @@ jobs:
             DOMAIN="${{ secrets.PROD_DOMAIN }}"
             ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            NGINX_CONF=""test1_backend".conf"
+            NGINX_CONF="test1_backend"
+            UPSTREAM_NAME="test1_backend"
           else
             # Development environment
             SERVER="${{ secrets.DEV_DOMAIN }}"
@@ -140,7 +150,8 @@ jobs:
             DOMAIN="${{ secrets.DEV_DOMAIN }}"
             ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
             SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
-            NGINX_CONF="test1_dev_backend.conf"
+            NGINX_CONF="test1_dev_backend"
+            UPSTREAM_NAME="test1_dev_backend"
           fi
           
           # Validate required variables
@@ -173,6 +184,9 @@ jobs:
           echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
           echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
           echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+          echo "nginx-conf=$NGINX_CONF" >> $GITHUB_OUTPUT
+          echo "upstream-name=$UPSTREAM_NAME" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           
           # Set environment variables for this job
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
@@ -183,7 +197,9 @@ jobs:
           echo "PROCESS_NAME=$PROCESS_NAME" >> $GITHUB_ENV
           echo "PORT_A=$PORT_A" >> $GITHUB_ENV
           echo "PORT_B=$PORT_B" >> $GITHUB_ENV
-          echo "domain=$DOMAIN" >> $GITHUB_ENV
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
+          echo "NGINX_CONF=$NGINX_CONF" >> $GITHUB_ENV
+          echo "UPSTREAM_NAME=$UPSTREAM_NAME" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH Configuration
         run: |
@@ -192,7 +208,7 @@ jobs:
           chmod 700 ~/.ssh
           
           # Determine which SSH key to use based on branch
-          BRANCH=${GITHUB_REF##*/}
+          BRANCH="${{ needs.build.outputs.branch }}"
           if [ "$BRANCH" = "main" ]; then
             SSH_KEY='${{ secrets.PROD_SSH_PRIVATE_KEY }}'
           else
@@ -228,10 +244,6 @@ jobs:
             Compression yes
           EOF
           
-          # Verify SSH config
-          echo "🔍 SSH Config:"
-          cat ~/.ssh/config
-          
           # Test SSH connection
           echo "🔍 Testing SSH connection to ${{ steps.env-setup.outputs.server }}..."
           if ssh -o BatchMode=yes -o ConnectTimeout=10 deploy "echo 'SSH connection successful'"; then
@@ -249,6 +261,9 @@ jobs:
       - name: 🚀 Deploy Application
         run: |
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
+          BRANCH="${{ needs.build.outputs.branch }}"
+          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
+          UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
           
           echo "📤 Creating deployment directory: $DEPLOY_DIR"
           ssh deploy "mkdir -p ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR"
@@ -257,7 +272,6 @@ jobs:
           scp -C deployment.tar.gz deploy:${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/deployment.tar.gz
           
           # Copy environment variables based on branch
-          BRANCH=${GITHUB_REF##*/}
           if [ "$BRANCH" = "main" ]; then
             echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
           else
@@ -265,20 +279,26 @@ jobs:
           fi
           
           # Execute deployment script
-          ssh deploy << 'DEPLOY_SCRIPT'
+          ssh deploy << DEPLOY_SCRIPT
             set -e
             
-            # Setup paths
+            # Setup paths and variables
             DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
             DEPLOYMENT_ID="${{ env.DEPLOYMENT_ID }}"
             NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
             CURRENT_PATH="$DEPLOY_PATH/current"
             STAGING_PATH="$DEPLOY_PATH/staging"
+            NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
+            UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+            BRANCH="${{ needs.build.outputs.branch }}"
             
             echo "🏗️ Setting up deployment paths..."
             echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
             echo "📂 Current: $CURRENT_PATH"
             echo "📂 Staging: $STAGING_PATH"
+            echo "🌿 Branch: $BRANCH"
+            echo "🔧 Nginx config: $NGINX_CONF.conf"
+            echo "🔧 Upstream name: $UPSTREAM_NAME"
             
             # Create directories
             mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
@@ -312,8 +332,8 @@ jobs:
             else
               echo "🔄 Found existing processes - Regular update"
               # Get current port from Nginx config
-              if [ -f "/etc/nginx/conf.d/"$NGINX_CONF".conf" ]; then
-                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/"$NGINX_CONF".conf | cut -d: -f2)
+              if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
+                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$NGINX_CONF.conf | cut -d: -f2)
                 echo "📍 Current Nginx port: $CURRENT_PORT"
               fi
             fi
@@ -417,16 +437,18 @@ jobs:
               fi
             fi
             
-            # Update Nginx config
-            echo "🔄 Updating Nginx to point to port $NEW_PORT..."
-            sudo tee "/etc/nginx/conf.d/"$NGINX_CONF".conf" > /dev/null << EOF
-          upstream "$NGINX_CONF" {
+            # Update Nginx config with proper upstream name (no quotes)
+            echo "🔄 Updating Nginx config $NGINX_CONF.conf to point to port $NEW_PORT..."
+            sudo tee "/etc/nginx/conf.d/$NGINX_CONF.conf" > /dev/null << EOF
+          upstream $UPSTREAM_NAME {
               server 127.0.0.1:$NEW_PORT;
           }
           EOF
             
-            # Test and reload Nginx
+            # Test Nginx configuration
+            echo "🔍 Testing Nginx configuration..."
             if sudo nginx -t; then
+              echo "✅ Nginx configuration test passed"
               sudo nginx -s reload
               echo "✅ Nginx reloaded successfully"
               sleep 3
@@ -468,6 +490,14 @@ jobs:
               
             else
               echo "❌ Nginx configuration test failed"
+              echo "🔍 Checking existing Nginx configurations..."
+              echo "📂 Files in /etc/nginx/conf.d/:"
+              ls -la /etc/nginx/conf.d/ || true
+              echo "📂 Files in /etc/nginx/sites-enabled/:"
+              ls -la /etc/nginx/sites-enabled/ || true
+              echo "🔍 Checking for conflicting upstream definitions..."
+              grep -r "upstream.*$UPSTREAM_NAME" /etc/nginx/ || true
+              
               pm2 delete $NEW_PROCESS
               exit 1
             fi
@@ -475,13 +505,16 @@ jobs:
 
       - name: 🔍 Verify Deployment
         run: |
-          ssh deploy << 'VERIFY_SCRIPT'
+          BRANCH="${{ needs.build.outputs.branch }}"
+          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
+          
+          ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
             pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
             
             echo ""
-            echo "🔧 Nginx Config:"
-            cat /etc/nginx/conf.d/"$NGINX_CONF".conf 2>/dev/null || echo "No Nginx config"
+            echo "🔧 Nginx Config ($NGINX_CONF.conf):"
+            cat /etc/nginx/conf.d/$NGINX_CONF.conf 2>/dev/null || echo "No Nginx config"
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
