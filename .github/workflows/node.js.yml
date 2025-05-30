@@ -127,7 +127,7 @@ jobs:
             DOMAIN="${{ secrets.PROD_DOMAIN }}"
             ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            NGINX_CONF=""$NGINX_CONF".conf"
+            NGINX_CONF=""test1_backend".conf"
           else
             # Development environment
             SERVER="${{ secrets.DEV_DOMAIN }}"
