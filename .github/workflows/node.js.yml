@@ -175,8 +175,13 @@ jobs:
             exit 1
           fi
           
+          if [ -z "$DEPLOY_PATH" ]; then
+            echo "❌ DEPLOY_PATH is not set. Please add DEPLOY_PATH to your repository secrets."
+            exit 1
+          fi
+          
           # Set outputs for use in later steps
-          echo "server=$DOMAIN" >> $GITHUB_OUTPUT
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
           echo "user=$USER" >> $GITHUB_OUTPUT
           echo "port=$PORT_SSH" >> $GITHUB_OUTPUT
           echo "deploy-path=$DEPLOY_PATH" >> $GITHUB_OUTPUT
@@ -190,7 +195,7 @@ jobs:
           
           # Set environment variables for this job
           echo "DEPLOYMENT_ID=${{ needs.build.outputs.deployment-id }}" >> $GITHUB_ENV
-          echo "SERVER=$DOMAIN" >> $GITHUB_ENV
+          echo "SERVER=$SERVER" >> $GITHUB_ENV
           echo "USER=$USER" >> $GITHUB_ENV
           echo "PORT_SSH=$PORT_SSH" >> $GITHUB_ENV
           echo "DEPLOY_PATH=$DEPLOY_PATH" >> $GITHUB_ENV
@@ -256,116 +261,141 @@ jobs:
       - name: 🧹 Clean Old Deployments First
         run: |
           echo "🧹 Cleaning old deployments (keeping only 2 most recent)..."
-          ssh deploy "cd ${{ steps.env-setup.outputs.deploy-path }}/deployments 2>/dev/null && ls -t | tail -n +3 | xargs -r rm -rf || echo 'No old deployments to clean'"
+          ssh deploy "mkdir -p ${{ steps.env-setup.outputs.deploy-path }}/deployments && cd ${{ steps.env-setup.outputs.deploy-path }}/deployments && ls -t | tail -n +3 | xargs -r rm -rf || echo 'No old deployments to clean'"
 
       - name: 🚀 Deploy Application
         run: |
+          # Define variables locally first
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           BRANCH="${{ needs.build.outputs.branch }}"
           NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+          DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
+          PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
+          PORT_A="${{ steps.env-setup.outputs.port-a }}"
+          PORT_B="${{ steps.env-setup.outputs.port-b }}"
+          
+          # Verify all required variables are set
+          echo "🔍 Verifying deployment variables..."
+          echo "  - DEPLOY_DIR: $DEPLOY_DIR"
+          echo "  - BRANCH: $BRANCH"
+          echo "  - NGINX_CONF: $NGINX_CONF"
+          echo "  - UPSTREAM_NAME: $UPSTREAM_NAME"
+          echo "  - DEPLOY_PATH: $DEPLOY_PATH"
+          echo "  - PROCESS_NAME: $PROCESS_NAME"
+          echo "  - PORT_A: $PORT_A"
+          echo "  - PORT_B: $PORT_B"
+          
+          if [ -z "$DEPLOY_PATH" ]; then
+            echo "❌ DEPLOY_PATH is empty! Cannot proceed with deployment."
+            exit 1
+          fi
           
           echo "📤 Creating deployment directory: $DEPLOY_DIR"
-          ssh deploy "mkdir -p ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR"
+          ssh deploy "mkdir -p $DEPLOY_PATH/deployments/$DEPLOY_DIR"
           
           echo "📤 Uploading deployment package..."
-          scp -C deployment.tar.gz deploy:${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/deployment.tar.gz
+          scp -C deployment.tar.gz deploy:$DEPLOY_PATH/deployments/$DEPLOY_DIR/deployment.tar.gz
           
           # Copy environment variables based on branch
           if [ "$BRANCH" = "main" ]; then
-            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
+            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env"
           else
-            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > ${{ steps.env-setup.outputs.deploy-path }}/deployments/$DEPLOY_DIR/.env"
+            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env"
           fi
           
-          # Execute deployment script
-          ssh deploy << DEPLOY_SCRIPT
-            set -e
-            
-            # Setup paths and variables
-            DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
-            DEPLOYMENT_ID="${{ env.DEPLOYMENT_ID }}"
-            NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
-            CURRENT_PATH="$DEPLOY_PATH/current"
-            STAGING_PATH="$DEPLOY_PATH/staging"
-            NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
-            UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
-            BRANCH="${{ needs.build.outputs.branch }}"
-            
-            echo "🏗️ Setting up deployment paths..."
-            echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
-            echo "📂 Current: $CURRENT_PATH"
-            echo "📂 Staging: $STAGING_PATH"
-            echo "🌿 Branch: $BRANCH"
-            echo "🔧 Nginx config: $NGINX_CONF.conf"
-            echo "🔧 Upstream name: $UPSTREAM_NAME"
-            
-            # Create directories
-            mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
-            
-            cd "$NEW_DEPLOYMENT_PATH"
-            
-            # Extract package
-            echo "📦 Extracting package..."
-            tar -xzf deployment.tar.gz && rm deployment.tar.gz
-            
-            # Verify critical files
-            [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
-            [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
-            
-            # Show build timestamp to verify it's fresh
-            echo "✅ Package extracted and verified"
-            echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
-            echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
-            
-            # Smart detection of deployment type
-            FIRST_DEPLOYMENT=false
+          # Create a temporary script file with all variables explicitly defined
+          cat > deploy_script.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          # These variables will be replaced by sed
+          DEPLOY_PATH="__DEPLOY_PATH__"
+          DEPLOYMENT_ID="__DEPLOYMENT_ID__"
+          NGINX_CONF="__NGINX_CONF__"
+          UPSTREAM_NAME="__UPSTREAM_NAME__"
+          PROCESS_NAME="__PROCESS_NAME__"
+          PORT_A="__PORT_A__"
+          PORT_B="__PORT_B__"
+          
+          # Setup paths
+          NEW_DEPLOYMENT_PATH="$DEPLOY_PATH/deployments/$DEPLOYMENT_ID"
+          CURRENT_PATH="$DEPLOY_PATH/current"
+          STAGING_PATH="$DEPLOY_PATH/staging"
+          
+          echo "🏗️ Setting up deployment paths..."
+          echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
+          echo "📂 Current: $CURRENT_PATH"
+          echo "📂 Staging: $STAGING_PATH"
+          echo "🔧 Nginx config: $NGINX_CONF.conf"
+          echo "🔧 Upstream name: $UPSTREAM_NAME"
+          
+          # Create directories
+          mkdir -p "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH" "$STAGING_PATH" "$DEPLOY_PATH/logs"
+          
+          cd "$NEW_DEPLOYMENT_PATH"
+          
+          # Extract package
+          echo "📦 Extracting package..."
+          tar -xzf deployment.tar.gz && rm deployment.tar.gz
+          
+          # Verify critical files
+          [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
+          [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
+          
+          # Show build timestamp to verify it's fresh
+          echo "✅ Package extracted and verified"
+          echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
+          echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
+          
+          # Smart detection of deployment type
+          FIRST_DEPLOYMENT=false
+          OLD_PROCESS=""
+          CURRENT_PORT=""
+          
+          # Check for existing processes with our process name pattern
+          EXISTING_PROCESSES=$(pm2 list | grep "$PROCESS_NAME" | grep "online" || true)
+          
+          if [ -z "$EXISTING_PROCESSES" ]; then
+            echo "🎯 No running processes found - First deployment or recovery"
+            FIRST_DEPLOYMENT=true
+          else
+            echo "🔄 Found existing processes - Regular update"
+            # Get current port from Nginx config
+            if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
+              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$NGINX_CONF.conf | cut -d: -f2)
+              echo "📍 Current Nginx port: $CURRENT_PORT"
+            fi
+          fi
+          
+          # Determine ports and processes
+          if [ "$FIRST_DEPLOYMENT" = true ]; then
+            NEW_PORT="$PORT_A"
+            NEW_PROCESS="$PROCESS_NAME-a"
             OLD_PROCESS=""
-            CURRENT_PORT=""
-            
-            # Check for existing processes with our process name pattern
-            EXISTING_PROCESSES=$(pm2 list | grep "${{ steps.env-setup.outputs.process-name }}" | grep "online" || true)
-            
-            if [ -z "$EXISTING_PROCESSES" ]; then
-              echo "🎯 No running processes found - First deployment or recovery"
-              FIRST_DEPLOYMENT=true
+            echo "🚀 First deployment: Using port $NEW_PORT with process $NEW_PROCESS"
+          else
+            # Switch ports for zero-downtime
+            if [ "$CURRENT_PORT" = "$PORT_A" ]; then
+              NEW_PORT="$PORT_B"
+              NEW_PROCESS="$PROCESS_NAME-b"
+              OLD_PROCESS="$PROCESS_NAME-a"
             else
-              echo "🔄 Found existing processes - Regular update"
-              # Get current port from Nginx config
-              if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
-                CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$NGINX_CONF.conf | cut -d: -f2)
-                echo "📍 Current Nginx port: $CURRENT_PORT"
-              fi
+              NEW_PORT="$PORT_A"
+              NEW_PROCESS="$PROCESS_NAME-a"
+              OLD_PROCESS="$PROCESS_NAME-b"
             fi
-            
-            # Determine ports and processes
-            if [ "$FIRST_DEPLOYMENT" = true ]; then
-              NEW_PORT="${{ steps.env-setup.outputs.port-a }}"
-              NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
-              OLD_PROCESS=""
-              echo "🚀 First deployment: Using port $NEW_PORT with process $NEW_PROCESS"
-            else
-              # Switch ports for zero-downtime
-              if [ "$CURRENT_PORT" = "${{ steps.env-setup.outputs.port-a }}" ]; then
-                NEW_PORT="${{ steps.env-setup.outputs.port-b }}"
-                NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-b"
-                OLD_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
-              else
-                NEW_PORT="${{ steps.env-setup.outputs.port-a }}"
-                NEW_PROCESS="${{ steps.env-setup.outputs.process-name }}-a"
-                OLD_PROCESS="${{ steps.env-setup.outputs.process-name }}-b"
-              fi
-              echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
-              echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
-            fi
-            
-            # Add environment variables
-            echo "PORT=$NEW_PORT" >> .env
-            echo "NODE_ENV=production" >> .env
-            echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> .env
-            
-            # Create PM2 config
-            cat > ecosystem.config.cjs << EOF
+            echo "🔄 Port switch: $CURRENT_PORT → $NEW_PORT"
+            echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
+          fi
+          
+          # Add environment variables
+          echo "PORT=$NEW_PORT" >> .env
+          echo "NODE_ENV=production" >> .env
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> .env
+          
+          # Create PM2 config
+          cat > ecosystem.config.cjs << EOFPM2
           module.exports = {
             apps: [{
               name: '$NEW_PROCESS',
@@ -391,122 +421,140 @@ jobs:
               time: true
             }]
           };
-          EOF
+          EOFPM2
+          
+          # Start new process
+          echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
+          pm2 start ecosystem.config.cjs
+          
+          # Health check function
+          health_check() {
+            local port=$1
+            local max_attempts=$2
+            local interval=$3
             
-            # Start new process
-            echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
-            pm2 start ecosystem.config.cjs
+            echo "🔍 Health check on port $port (max $max_attempts attempts)..."
             
-            # Health check function
-            health_check() {
-              local port=$1
-              local max_attempts=$2
-              local interval=$3
-              
-              echo "🔍 Health check on port $port (max $max_attempts attempts)..."
-              
-              for i in $(seq 1 $max_attempts); do
-                if curl -f -s --max-time 2 "http://localhost:$port/api/health" >/dev/null 2>&1; then
-                  echo "✅ Health check passed on port $port (attempt $i)"
-                  return 0
-                fi
-                echo "🔄 Health check attempt $i/$max_attempts on port $port..."
-                sleep $interval
-              done
-              
-              echo "❌ Health check failed after $max_attempts attempts"
-              return 1
-            }
-            
-            # Local health check
-            if [ "$FIRST_DEPLOYMENT" = true ]; then
-              # More lenient for first deployment
-              if ! health_check $NEW_PORT 30 2; then
-                echo "❌ First deployment health check failed"
-                pm2 logs $NEW_PROCESS --lines 50
-                pm2 delete $NEW_PROCESS
-                exit 1
+            for i in $(seq 1 $max_attempts); do
+              if curl -f -s --max-time 2 "http://localhost:$port/api/health" >/dev/null 2>&1; then
+                echo "✅ Health check passed on port $port (attempt $i)"
+                return 0
               fi
-            else
-              # Standard for updates
-              if ! health_check $NEW_PORT 20 1; then
-                echo "❌ Update health check failed"
-                pm2 logs $NEW_PROCESS --lines 20
-                pm2 delete $NEW_PROCESS
-                exit 1
-              fi
-            fi
+              echo "🔄 Health check attempt $i/$max_attempts on port $port..."
+              sleep $interval
+            done
             
-            # Update Nginx config with proper upstream name (no quotes)
-            echo "🔄 Updating Nginx config $NGINX_CONF.conf to point to port $NEW_PORT..."
-            sudo tee "/etc/nginx/conf.d/$NGINX_CONF.conf" > /dev/null << EOF
-          upstream $UPSTREAM_NAME {
-              server 127.0.0.1:$NEW_PORT;
+            echo "❌ Health check failed after $max_attempts attempts"
+            return 1
           }
-          EOF
-            
-            # Test Nginx configuration
-            echo "🔍 Testing Nginx configuration..."
-            if sudo nginx -t; then
-              echo "✅ Nginx configuration test passed"
-              sudo nginx -s reload
-              echo "✅ Nginx reloaded successfully"
-              sleep 3
-              
-              # Always proceed with deployment since local health check passed
-              echo "✅ Local health check passed, proceeding with deployment"
-              
-              # Stop old process if it exists and this is an update
-              if [ "$FIRST_DEPLOYMENT" = false ] && [ -n "$OLD_PROCESS" ]; then
-                if pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
-                  echo "🛑 Stopping old process: $OLD_PROCESS"
-                  pm2 stop $OLD_PROCESS
-                  sleep 1
-                  pm2 delete $OLD_PROCESS
-                else
-                  echo "ℹ️ Old process $OLD_PROCESS not found (already stopped)"
-                fi
-              fi
-              
-              # Update symlinks and staging
-              echo "🔄 Updating symlinks..."
-              [ -L "$CURRENT_PATH" ] && rm "$CURRENT_PATH"
-              ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
-              
-              echo "🔄 Updating staging directory..."
-              rm -rf "$STAGING_PATH"/* 2>/dev/null || true
-              cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
-              
-              # Save PM2 and cleanup
-              pm2 save
-              
-              # Keep only 2 most recent deployments (final cleanup)
-              echo "🧹 Final cleanup - keeping only 2 most recent deployments..."
-              cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
-              
-              echo "🎉 Deployment completed successfully!"
-              echo "📂 Current deployments:"
-              ls -la "$DEPLOY_PATH/deployments"
-              
-            else
-              echo "❌ Nginx configuration test failed"
-              echo "🔍 Checking existing Nginx configurations..."
-              echo "📂 Files in /etc/nginx/conf.d/:"
-              ls -la /etc/nginx/conf.d/ || true
-              echo "📂 Files in /etc/nginx/sites-enabled/:"
-              ls -la /etc/nginx/sites-enabled/ || true
-              echo "🔍 Checking for conflicting upstream definitions..."
-              grep -r "upstream.*$UPSTREAM_NAME" /etc/nginx/ || true
-              
+          
+          # Local health check
+          if [ "$FIRST_DEPLOYMENT" = true ]; then
+            # More lenient for first deployment
+            if ! health_check $NEW_PORT 30 2; then
+              echo "❌ First deployment health check failed"
+              pm2 logs $NEW_PROCESS --lines 50
               pm2 delete $NEW_PROCESS
               exit 1
             fi
-          DEPLOY_SCRIPT
+          else
+            # Standard for updates
+            if ! health_check $NEW_PORT 20 1; then
+              echo "❌ Update health check failed"
+              pm2 logs $NEW_PROCESS --lines 20
+              pm2 delete $NEW_PROCESS
+              exit 1
+            fi
+          fi
+          
+          # Update Nginx config with proper upstream name (no quotes)
+          echo "🔄 Updating Nginx config $NGINX_CONF.conf to point to port $NEW_PORT..."
+          sudo mkdir -p /etc/nginx/conf.d/
+          sudo tee "/etc/nginx/conf.d/$NGINX_CONF.conf" > /dev/null << EOFNGINX
+          upstream $UPSTREAM_NAME {
+              server 127.0.0.1:$NEW_PORT;
+          }
+          EOFNGINX
+          
+          # Test Nginx configuration
+          echo "🔍 Testing Nginx configuration..."
+          if sudo nginx -t; then
+            echo "✅ Nginx configuration test passed"
+            sudo nginx -s reload
+            echo "✅ Nginx reloaded successfully"
+            sleep 3
+            
+            # Always proceed with deployment since local health check passed
+            echo "✅ Local health check passed, proceeding with deployment"
+            
+            # Stop old process if it exists and this is an update
+            if [ "$FIRST_DEPLOYMENT" = false ] && [ -n "$OLD_PROCESS" ]; then
+              if pm2 describe $OLD_PROCESS >/dev/null 2>&1; then
+                echo "🛑 Stopping old process: $OLD_PROCESS"
+                pm2 stop $OLD_PROCESS
+                sleep 1
+                pm2 delete $OLD_PROCESS
+              else
+                echo "ℹ️ Old process $OLD_PROCESS not found (already stopped)"
+              fi
+            fi
+            
+            # Update symlinks and staging
+            echo "🔄 Updating symlinks..."
+            [ -L "$CURRENT_PATH" ] && rm "$CURRENT_PATH"
+            ln -sfn "$NEW_DEPLOYMENT_PATH" "$CURRENT_PATH"
+            
+            echo "🔄 Updating staging directory..."
+            rm -rf "$STAGING_PATH"/* 2>/dev/null || true
+            cp -r "$NEW_DEPLOYMENT_PATH"/* "$STAGING_PATH/"
+            
+            # Save PM2 and cleanup
+            pm2 save
+            
+            # Keep only 2 most recent deployments (final cleanup)
+            echo "🧹 Final cleanup - keeping only 2 most recent deployments..."
+            cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
+            
+            echo "🎉 Deployment completed successfully!"
+            echo "📂 Current deployments:"
+            ls -la "$DEPLOY_PATH/deployments"
+            
+          else
+            echo "❌ Nginx configuration test failed"
+            echo "🔍 Checking existing Nginx configurations..."
+            echo "📂 Files in /etc/nginx/conf.d/:"
+            ls -la /etc/nginx/conf.d/ || true
+            echo "📂 Files in /etc/nginx/sites-enabled/:"
+            ls -la /etc/nginx/sites-enabled/ || true
+            echo "🔍 Checking for conflicting upstream definitions..."
+            grep -r "upstream.*$UPSTREAM_NAME" /etc/nginx/ || true
+            
+            pm2 delete $NEW_PROCESS
+            exit 1
+          fi
+          EOF
+          
+          # Replace placeholders with actual values
+          sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g" deploy_script.sh
+          sed -i "s|__DEPLOYMENT_ID__|$DEPLOY_DIR|g" deploy_script.sh
+          sed -i "s|__NGINX_CONF__|$NGINX_CONF|g" deploy_script.sh
+          sed -i "s|__UPSTREAM_NAME__|$UPSTREAM_NAME|g" deploy_script.sh
+          sed -i "s|__PROCESS_NAME__|$PROCESS_NAME|g" deploy_script.sh
+          sed -i "s|__PORT_A__|$PORT_A|g" deploy_script.sh
+          sed -i "s|__PORT_B__|$PORT_B|g" deploy_script.sh
+          
+          # Upload and execute the script
+          scp deploy_script.sh deploy:$DEPLOY_PATH/deployments/$DEPLOY_DIR/deploy_script.sh
+          ssh deploy "chmod +x $DEPLOY_PATH/deployments/$DEPLOY_DIR/deploy_script.sh && $DEPLOY_PATH/deployments/$DEPLOY_DIR/deploy_script.sh"
+          
+          # Clean up local script
+          rm deploy_script.sh
 
       - name: 🔍 Verify Deployment
         run: |
           BRANCH="${{ needs.build.outputs.branch }}"
           NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
+          DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
@@ -518,15 +566,15 @@ jobs:
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
-            ls -la ${{ steps.env-setup.outputs.deploy-path }}/deployments
+            ls -la $DEPLOY_PATH/deployments
             
             echo ""
             echo "📂 Current Symlink:"
-            ls -la ${{ steps.env-setup.outputs.deploy-path }}/current
+            ls -la $DEPLOY_PATH/current
             
             echo ""
             echo "📂 Staging Directory:"
-            ls -la ${{ steps.env-setup.outputs.deploy-path }}/staging
+            ls -la $DEPLOY_PATH/staging
             
             echo ""
             echo "🌐 Health Check Test:"
