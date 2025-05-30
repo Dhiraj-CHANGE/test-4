@@ -150,7 +150,7 @@ jobs:
             DOMAIN="${{ secrets.DEV_DOMAIN }}"
             ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
             SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
-            # For development, also use $UPSTREAM_NAME to match existing config
+            # For development, use the same upstream name that the site config expects
             UPSTREAM_NAME="test1_dev_backend"
           fi
           
@@ -547,6 +547,7 @@ jobs:
         run: |
           BRANCH="${{ needs.build.outputs.branch }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
+          UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
