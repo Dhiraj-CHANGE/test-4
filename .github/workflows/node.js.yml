@@ -6,7 +6,7 @@ on:
 
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v3'  # Bumped version
+  CACHE_VERSION: 'v3'
 
 jobs:
   build:
@@ -136,7 +136,7 @@ jobs:
             DOMAIN="${{ secrets.PROD_DOMAIN }}"
             ENV_SECRET="${{ secrets.PROD_ENV_SECRET }}"
             SSH_KEY="${{ secrets.PROD_SSH_PRIVATE_KEY }}"
-            NGINX_CONF="test1_backend"
+            # For production, use the existing upstream name that the site config expects
             UPSTREAM_NAME="test1_backend"
           else
             # Development environment
@@ -150,7 +150,7 @@ jobs:
             DOMAIN="${{ secrets.DEV_DOMAIN }}"
             ENV_SECRET="${{ secrets.DEV_ENV_SECRET }}"
             SSH_KEY="${{ secrets.DEV_SSH_PRIVATE_KEY }}"
-            NGINX_CONF="test1_dev_backend"
+            # For development, also use $UPSTREAM_NAME to match existing config
             UPSTREAM_NAME="test1_dev_backend"
           fi
           
@@ -189,7 +189,6 @@ jobs:
           echo "port-a=$PORT_A" >> $GITHUB_OUTPUT
           echo "port-b=$PORT_B" >> $GITHUB_OUTPUT
           echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
-          echo "nginx-conf=$NGINX_CONF" >> $GITHUB_OUTPUT
           echo "upstream-name=$UPSTREAM_NAME" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           
@@ -203,7 +202,6 @@ jobs:
           echo "PORT_A=$PORT_A" >> $GITHUB_ENV
           echo "PORT_B=$PORT_B" >> $GITHUB_ENV
           echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
-          echo "NGINX_CONF=$NGINX_CONF" >> $GITHUB_ENV
           echo "UPSTREAM_NAME=$UPSTREAM_NAME" >> $GITHUB_ENV
 
       - name: 🔐 Setup SSH Configuration
@@ -268,7 +266,6 @@ jobs:
           # Define variables locally first
           DEPLOY_DIR="${{ env.DEPLOYMENT_ID }}"
           BRANCH="${{ needs.build.outputs.branch }}"
-          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
@@ -279,7 +276,6 @@ jobs:
           echo "🔍 Verifying deployment variables..."
           echo "  - DEPLOY_DIR: $DEPLOY_DIR"
           echo "  - BRANCH: $BRANCH"
-          echo "  - NGINX_CONF: $NGINX_CONF"
           echo "  - UPSTREAM_NAME: $UPSTREAM_NAME"
           echo "  - DEPLOY_PATH: $DEPLOY_PATH"
           echo "  - PROCESS_NAME: $PROCESS_NAME"
@@ -312,7 +308,6 @@ jobs:
           # These variables will be replaced by sed
           DEPLOY_PATH="__DEPLOY_PATH__"
           DEPLOYMENT_ID="__DEPLOYMENT_ID__"
-          NGINX_CONF="__NGINX_CONF__"
           UPSTREAM_NAME="__UPSTREAM_NAME__"
           PROCESS_NAME="__PROCESS_NAME__"
           PORT_A="__PORT_A__"
@@ -327,7 +322,6 @@ jobs:
           echo "📂 New deployment: $NEW_DEPLOYMENT_PATH"
           echo "📂 Current: $CURRENT_PATH"
           echo "📂 Staging: $STAGING_PATH"
-          echo "🔧 Nginx config: $NGINX_CONF.conf"
           echo "🔧 Upstream name: $UPSTREAM_NAME"
           
           # Create directories
@@ -361,9 +355,9 @@ jobs:
             FIRST_DEPLOYMENT=true
           else
             echo "🔄 Found existing processes - Regular update"
-            # Get current port from Nginx config
-            if [ -f "/etc/nginx/conf.d/$NGINX_CONF.conf" ]; then
-              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$NGINX_CONF.conf | cut -d: -f2)
+            # Get current port from existing upstream config
+            if [ -f "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" ]; then
+              CURRENT_PORT=$(grep -o "127.0.0.1:[0-9]*" /etc/nginx/conf.d/$UPSTREAM_NAME.conf | cut -d: -f2)
               echo "📍 Current Nginx port: $CURRENT_PORT"
             fi
           fi
@@ -467,10 +461,10 @@ jobs:
             fi
           fi
           
-          # Update Nginx config with proper upstream name (no quotes)
-          echo "🔄 Updating Nginx config $NGINX_CONF.conf to point to port $NEW_PORT..."
+          # Update the upstream configuration that the existing site config expects
+          echo "🔄 Updating upstream $UPSTREAM_NAME to point to port $NEW_PORT..."
           sudo mkdir -p /etc/nginx/conf.d/
-          sudo tee "/etc/nginx/conf.d/$NGINX_CONF.conf" > /dev/null << EOFNGINX
+          sudo tee "/etc/nginx/conf.d/$UPSTREAM_NAME.conf" > /dev/null << EOFNGINX
           upstream $UPSTREAM_NAME {
               server 127.0.0.1:$NEW_PORT;
           }
@@ -537,7 +531,6 @@ jobs:
           # Replace placeholders with actual values
           sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g" deploy_script.sh
           sed -i "s|__DEPLOYMENT_ID__|$DEPLOY_DIR|g" deploy_script.sh
-          sed -i "s|__NGINX_CONF__|$NGINX_CONF|g" deploy_script.sh
           sed -i "s|__UPSTREAM_NAME__|$UPSTREAM_NAME|g" deploy_script.sh
           sed -i "s|__PROCESS_NAME__|$PROCESS_NAME|g" deploy_script.sh
           sed -i "s|__PORT_A__|$PORT_A|g" deploy_script.sh
@@ -553,7 +546,6 @@ jobs:
       - name: 🔍 Verify Deployment
         run: |
           BRANCH="${{ needs.build.outputs.branch }}"
-          NGINX_CONF="${{ steps.env-setup.outputs.nginx-conf }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           
           ssh deploy << VERIFY_SCRIPT
@@ -561,8 +553,8 @@ jobs:
             pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
             
             echo ""
-            echo "🔧 Nginx Config ($NGINX_CONF.conf):"
-            cat /etc/nginx/conf.d/$NGINX_CONF.conf 2>/dev/null || echo "No Nginx config"
+            echo "🔧 Nginx Upstream Config:"
+            cat /etc/nginx/conf.d/$UPSTREAM_NAME.conf 2>/dev/null || echo "No upstream config"
             
             echo ""
             echo "📂 Deployment Directory (should show only 2 most recent):"
