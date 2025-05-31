@@ -507,7 +507,7 @@ jobs:
             
             # Keep only 2 most recent deployments (final cleanup)
             echo "🧹 Final cleanup - keeping only 2 most recent deployments..."
-            cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
+            cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +2 | xargs -r rm -rf
             
             echo "🎉 Deployment completed successfully!"
             echo "📂 Current deployments:"
