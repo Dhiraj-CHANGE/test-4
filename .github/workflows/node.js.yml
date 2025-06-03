@@ -343,15 +343,15 @@ jobs:
           echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
           echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
           
-          # CRITICAL FIX: Parse .env file and create environment variables for PM2
+          # CRITICAL FIX: Use .cjs extension for CommonJS scripts
           echo "🔧 Parsing .env file for PM2..."
           
           # Show .env file contents (masked sensitive data)
           echo "📄 .env file contents (first 10 lines, sensitive data masked):"
           head -10 .env | sed 's/=.*/=***MASKED***/' || echo "Could not read .env file"
           
-          # Parse .env file and create a JavaScript object for PM2
-          cat > parse_env.js << 'EOFJS'
+          # Parse .env file and create a JavaScript object for PM2 - FIXED: Use .cjs extension
+          cat > parse_env.cjs << 'EOFJS'
           const fs = require('fs');
           const path = require('path');
           
@@ -377,8 +377,8 @@ jobs:
           }
           EOFJS
           
-          # Parse environment variables
-          ENV_VARS=$(node parse_env.js)
+          # Parse environment variables - FIXED: Use .cjs extension
+          ENV_VARS=$(node parse_env.cjs)
           echo "🔍 Parsed environment variables count: $(echo "$ENV_VARS" | jq 'keys | length')"
           
           # Smart detection of deployment type
@@ -422,8 +422,8 @@ jobs:
             echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
           fi
           
-          # CRITICAL FIX: Create PM2 config with ALL environment variables from .env
-          cat > create_pm2_config.js << 'EOFJS'
+          # CRITICAL FIX: Create PM2 config with ALL environment variables from .env - FIXED: Use .cjs extension
+          cat > create_pm2_config.cjs << 'EOFJS'
           const fs = require('fs');
           
           // Parse .env file
@@ -478,8 +478,8 @@ jobs:
           console.log('📋 Environment variables loaded:', Object.keys(envVars).join(', '));
           EOFJS
           
-          # Create PM2 config with all environment variables
-          node create_pm2_config.js
+          # Create PM2 config with all environment variables - FIXED: Use .cjs extension
+          node create_pm2_config.cjs
           
           # Replace placeholders in the generated config
           sed -i "s|__NEW_PORT__|$NEW_PORT|g" ecosystem.config.cjs
@@ -488,9 +488,9 @@ jobs:
           sed -i "s|__NEW_DEPLOYMENT_PATH__|$NEW_DEPLOYMENT_PATH|g" ecosystem.config.cjs
           sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g" ecosystem.config.cjs
           
-          # Show PM2 config (first 20 lines)
+          # Show PM2 config (first 30 lines)
           echo "🔍 PM2 config preview:"
-          head -20 ecosystem.config.cjs
+          head -30 ecosystem.config.cjs
           
           # Start new process
           echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
