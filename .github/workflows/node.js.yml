@@ -35,6 +35,29 @@ jobs:
           echo "deployment-id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
           echo "🆔 Deployment ID: $DEPLOYMENT_ID"
 
+      - name: ⚙️ Setup Build Environment Variables
+        run: |
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          echo "🔧 Setting up build-time environment variables for branch: $BRANCH"
+          
+          # Create .env file for build process
+          if [ "$BRANCH" = "main" ]; then
+            echo '${{ secrets.PROD_ENV_SECRET }}' > .env.production
+            echo '${{ secrets.PROD_ENV_SECRET }}' > .env.local
+            echo "📝 Created production environment files"
+          else
+            echo '${{ secrets.DEV_ENV_SECRET }}' > .env.development
+            echo '${{ secrets.DEV_ENV_SECRET }}' > .env.local
+            echo "📝 Created development environment files"
+          fi
+          
+          # Show environment variables that will be available during build (non-sensitive only)
+          echo "🔍 Build-time environment variables (NEXT_PUBLIC_ only):"
+          grep "^NEXT_PUBLIC_" .env.local | sed 's/=.*/=***MASKED***/' || echo "No NEXT_PUBLIC_ variables found"
+          
+          # Verify the environment file exists and has content
+          echo "📄 Environment file size: $(wc -l < .env.local) lines"
+
       - name: ⚡ Setup Node.js with Cache
         uses: actions/setup-node@v4
         with:
@@ -55,7 +78,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: .next
-          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ steps.branch.outputs.branch }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}
+          key: ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ steps.branch.outputs.branch }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.json', '!node_modules/**') }}-${{ hashFiles('.env.*') }}
           restore-keys: |
             ${{ env.CACHE_VERSION }}-build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
 
@@ -68,8 +91,27 @@ jobs:
       - name: 🏗️ Build Application
         if: steps.cache-check.outputs.cache-hit != 'true'
         run: |
+          echo "🏗️ Building with environment variables..."
+          
+          # Verify environment variables are available for build
+          echo "🔍 Checking NEXT_PUBLIC_ variables before build:"
+          env | grep "^NEXT_PUBLIC_" || echo "No NEXT_PUBLIC_ variables in environment"
+          
+          # Build with explicit environment
           NODE_ENV=production npm run build
+          
           echo "✅ Build completed"
+          
+          # Verify build output contains environment variables
+          echo "🔍 Checking if environment variables are baked into build..."
+          if [ -f ".next/static/chunks/webpack-*.js" ]; then
+            WEBPACK_FILE=$(ls .next/static/chunks/webpack-*.js | head -1)
+            if grep -q "NEXT_PUBLIC_NODE_ENV" "$WEBPACK_FILE" 2>/dev/null; then
+              echo "✅ Environment variables found in webpack bundle"
+            else
+              echo "⚠️ Environment variables not found in webpack bundle"
+            fi
+          fi
 
       - name: 📦 Create Optimized Package
         run: |
@@ -86,6 +128,7 @@ jobs:
           echo "  - .next size: $(du -sh .next | cut -f1)"
           echo "  - node_modules size: $(du -sh node_modules | cut -f1)"
           
+          # Include environment files in the package
           tar -czf deployment.tar.gz \
             --exclude='node_modules/.cache' \
             --exclude='node_modules/*/test*' \
@@ -96,7 +139,8 @@ jobs:
             node_modules \
             public \
             package.json \
-            next.config.*
+            next.config.* \
+            .env.*
           echo "📦 Package size: $(du -sh deployment.tar.gz | cut -f1)"
 
       - name: 🚀 Upload Artifact
@@ -291,7 +335,7 @@ jobs:
           echo "📤 Uploading deployment package..."
           scp -C deployment.tar.gz deploy:$DEPLOY_PATH/deployments/$DEPLOY_DIR/deployment.tar.gz
           
-          # Copy environment variables based on branch
+          # Copy environment variables based on branch (for runtime)
           if [ "$BRANCH" = "main" ]; then
             echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env"
           else
@@ -343,6 +387,22 @@ jobs:
           echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
           echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
           
+          # Check if environment variables are baked into the build
+          echo "🔍 Checking if NEXT_PUBLIC variables are in build..."
+          if [ -f ".next/static/chunks/webpack-"*.js ]; then
+            WEBPACK_FILE=$(ls .next/static/chunks/webpack-*.js | head -1)
+            if grep -q "NEXT_PUBLIC_NODE_ENV" "$WEBPACK_FILE" 2>/dev/null; then
+              echo "✅ NEXT_PUBLIC_NODE_ENV found in webpack bundle"
+              # Extract the value to verify
+              FOUND_VALUE=$(grep -o "NEXT_PUBLIC_NODE_ENV[^,]*" "$WEBPACK_FILE" | head -1 || echo "not found")
+              echo "📋 Found in bundle: $FOUND_VALUE"
+            else
+              echo "⚠️ NEXT_PUBLIC_NODE_ENV not found in webpack bundle"
+              echo "🔍 Searching all build files..."
+              find .next -name "*.js" -exec grep -l "NEXT_PUBLIC_NODE_ENV" {} \; || echo "Not found in any build files"
+            fi
+          fi
+          
           # CRITICAL FIX: Use .cjs extension for CommonJS scripts
           echo "🔧 Parsing .env file for PM2..."
           
@@ -380,6 +440,10 @@ jobs:
           # Parse environment variables - FIXED: Use .cjs extension
           ENV_VARS=$(node parse_env.cjs)
           echo "🔍 Parsed environment variables count: $(echo "$ENV_VARS" | jq 'keys | length')"
+          
+          # Show NEXT_PUBLIC variables specifically
+          echo "🔍 NEXT_PUBLIC variables in .env:"
+          grep "^NEXT_PUBLIC_" .env || echo "No NEXT_PUBLIC_ variables found in .env"
           
           # Smart detection of deployment type
           FIRST_DEPLOYMENT=false
@@ -476,6 +540,10 @@ jobs:
           
           console.log('✅ PM2 config created with', Object.keys(envVars).length, 'environment variables');
           console.log('📋 Environment variables loaded:', Object.keys(envVars).join(', '));
+          
+          // Show NEXT_PUBLIC variables specifically
+          const nextPublicVars = Object.keys(envVars).filter(key => key.startsWith('NEXT_PUBLIC_'));
+          console.log('🔍 NEXT_PUBLIC variables in PM2 config:', nextPublicVars.join(', '));
           EOFJS
           
           # Create PM2 config with all environment variables - FIXED: Use .cjs extension
@@ -608,6 +676,20 @@ jobs:
             echo "📄 Environment variables in PM2:"
             pm2 show $NEW_PROCESS | grep -A 10 "Environment:" | head -10
             
+            # Test the actual frontend to see if NEXT_PUBLIC variables are working
+            echo "🔍 Testing NEXT_PUBLIC variables in frontend..."
+            RESPONSE=$(curl -s "http://localhost:$NEW_PORT" || echo "CURL_FAILED")
+            if echo "$RESPONSE" | grep -q "NEXT_PUBLIC_NODE_ENV"; then
+              echo "✅ NEXT_PUBLIC_NODE_ENV found in frontend response"
+              # Extract the actual value shown
+              FRONTEND_VALUE=$(echo "$RESPONSE" | grep -o "NEXT_PUBLIC_NODE_ENV[^<]*" | head -1 || echo "not extracted")
+              echo "📋 Frontend shows: $FRONTEND_VALUE"
+            else
+              echo "❌ NEXT_PUBLIC_NODE_ENV not found in frontend response"
+              echo "🔍 Response preview (first 500 chars):"
+              echo "$RESPONSE" | head -c 500
+            fi
+            
           else
             echo "❌ Nginx configuration test failed"
             echo "🔍 Checking existing Nginx configurations..."
@@ -645,6 +727,7 @@ jobs:
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
           PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
+          DOMAIN="${{ steps.env-setup.outputs.domain }}"
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
@@ -659,8 +742,8 @@ jobs:
             if [ -f "$DEPLOY_PATH/current/.env" ]; then
               echo "✅ .env file exists in current deployment"
               echo "📄 .env file size: \$(wc -l < $DEPLOY_PATH/current/.env) lines"
-              echo "📄 Sample variables (non-sensitive):"
-              grep -v -E "(PASSWORD|SECRET|KEY|TOKEN|API)" $DEPLOY_PATH/current/.env | head -5 || echo "No non-sensitive variables found"
+              echo "📄 NEXT_PUBLIC variables in .env:"
+              grep "^NEXT_PUBLIC_" $DEPLOY_PATH/current/.env | sed 's/=.*/=***MASKED***/' || echo "No NEXT_PUBLIC_ variables found"
             else
               echo "❌ .env file missing in current deployment"
             fi
@@ -671,13 +754,25 @@ jobs:
             if [ -n "\$CURRENT_PROCESS" ]; then
               echo "📋 Current process: \$CURRENT_PROCESS"
               pm2 show \$CURRENT_PROCESS | grep -A 20 "Environment:" | head -20
+              echo ""
+              echo "🔍 NEXT_PUBLIC variables in PM2:"
+              pm2 show \$CURRENT_PROCESS | grep -A 50 "Environment:" | grep "NEXT_PUBLIC" || echo "No NEXT_PUBLIC variables found in PM2"
             else
               echo "❌ No running process found"
             fi
             
             echo ""
-            echo "🌐 Health Check Test:"
-            curl -s "https://${{ steps.env-setup.outputs.domain }}" || echo "External health check failed"
+            echo "🌐 Frontend Test - Checking if NEXT_PUBLIC variables appear:"
+            FRONTEND_RESPONSE=\$(curl -s "https://$DOMAIN" 2>/dev/null || curl -s "http://localhost:3000" 2>/dev/null || echo "CURL_FAILED")
+            if echo "\$FRONTEND_RESPONSE" | grep -q "NEXT_PUBLIC_NODE_ENV"; then
+              echo "✅ NEXT_PUBLIC_NODE_ENV found in frontend"
+              echo "📋 Frontend content with NEXT_PUBLIC_NODE_ENV:"
+              echo "\$FRONTEND_RESPONSE" | grep -o "NEXT_PUBLIC_NODE_ENV[^<]*" | head -3
+            else
+              echo "❌ NEXT_PUBLIC_NODE_ENV not found in frontend"
+              echo "🔍 Searching for any environment-related content:"
+              echo "\$FRONTEND_RESPONSE" | grep -i "env\|check" | head -3 || echo "No environment content found"
+            fi
           VERIFY_SCRIPT
 
       - name: 🧹 Cleanup
