@@ -291,11 +291,11 @@ jobs:
           echo "📤 Uploading deployment package..."
           scp -C deployment.tar.gz deploy:$DEPLOY_PATH/deployments/$DEPLOY_DIR/deployment.tar.gz
           
-          # Copy environment variables based on branch - FIXED ENV HANDLING
+          # Copy environment variables based on branch
           if [ "$BRANCH" = "main" ]; then
-            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env.production"
+            echo '${{ secrets.PROD_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env"
           else
-            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env.development"
+            echo '${{ secrets.DEV_ENV_SECRET }}' | ssh deploy "cat > $DEPLOY_PATH/deployments/$DEPLOY_DIR/.env"
           fi
           
           # Create a temporary script file with all variables explicitly defined
@@ -336,23 +336,50 @@ jobs:
           # Verify critical files
           [ ! -f "package.json" ] && { echo "❌ package.json missing"; exit 1; }
           [ ! -d ".next" ] && { echo "❌ .next directory missing"; exit 1; }
+          [ ! -f ".env" ] && { echo "❌ .env file missing"; exit 1; }
           
           # Show build timestamp to verify it's fresh
           echo "✅ Package extracted and verified"
           echo "📅 Build timestamp: $(stat -c %y .next/BUILD_ID 2>/dev/null || echo 'N/A')"
           echo "🔍 Deployment ID in package: $DEPLOYMENT_ID"
           
-          # FIXED: Properly handle environment variables
-          echo "🔧 Setting up environment variables..."
+          # CRITICAL FIX: Parse .env file and create environment variables for PM2
+          echo "🔧 Parsing .env file for PM2..."
           
-          # Copy the environment-specific file to .env
-          if [ "$BRANCH" = "main" ]; then
-            cp .env.production .env
-            echo "📝 Using production environment variables"
-          else
-            cp .env.development .env
-            echo "📝 Using development environment variables"
-          fi
+          # Show .env file contents (masked sensitive data)
+          echo "📄 .env file contents (first 10 lines, sensitive data masked):"
+          head -10 .env | sed 's/=.*/=***MASKED***/' || echo "Could not read .env file"
+          
+          # Parse .env file and create a JavaScript object for PM2
+          cat > parse_env.js << 'EOFJS'
+          const fs = require('fs');
+          const path = require('path');
+          
+          try {
+            const envFile = fs.readFileSync('.env', 'utf8');
+            const envVars = {};
+            
+            envFile.split('\n').forEach(line => {
+              line = line.trim();
+              if (line && !line.startsWith('#')) {
+                const [key, ...valueParts] = line.split('=');
+                if (key && valueParts.length > 0) {
+                  const value = valueParts.join('=').replace(/^["']|["']$/g, '');
+                  envVars[key.trim()] = value;
+                }
+              }
+            });
+            
+            console.log(JSON.stringify(envVars, null, 2));
+          } catch (error) {
+            console.error('Error parsing .env file:', error.message);
+            process.exit(1);
+          }
+          EOFJS
+          
+          # Parse environment variables
+          ENV_VARS=$(node parse_env.js)
+          echo "🔍 Parsed environment variables count: $(echo "$ENV_VARS" | jq 'keys | length')"
           
           # Smart detection of deployment type
           FIRST_DEPLOYMENT=false
@@ -395,36 +422,40 @@ jobs:
             echo "🔄 Process switch: $OLD_PROCESS → $NEW_PROCESS"
           fi
           
-          # FIXED: Add deployment-specific variables to .env (append, don't overwrite)
-          echo "" >> .env
-          echo "# Deployment-specific variables" >> .env
-          echo "PORT=$NEW_PORT" >> .env
-          echo "NODE_ENV=production" >> .env
-          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> .env
-          echo "NEXT_TELEMETRY_DISABLED=1" >> .env
+          # CRITICAL FIX: Create PM2 config with ALL environment variables from .env
+          cat > create_pm2_config.js << 'EOFJS'
+          const fs = require('fs');
           
-          # Debug: Show .env contents (without sensitive data)
-          echo "🔍 Environment file contents:"
-          echo "📄 .env file size: $(wc -l < .env) lines"
-          echo "📄 Sample variables (first 5 non-sensitive lines):"
-          grep -v -E "(PASSWORD|SECRET|KEY|TOKEN)" .env | head -5 || echo "No non-sensitive variables found"
+          // Parse .env file
+          const envFile = fs.readFileSync('.env', 'utf8');
+          const envVars = {};
           
-          # FIXED: Create PM2 config that loads .env file
-          cat > ecosystem.config.cjs << EOFPM2
-          module.exports = {
+          envFile.split('\n').forEach(line => {
+            line = line.trim();
+            if (line && !line.startsWith('#')) {
+              const [key, ...valueParts] = line.split('=');
+              if (key && valueParts.length > 0) {
+                const value = valueParts.join('=').replace(/^["']|["']$/g, '');
+                envVars[key.trim()] = value;
+              }
+            }
+          });
+          
+          // Add deployment-specific variables
+          envVars.PORT = '__NEW_PORT__';
+          envVars.NODE_ENV = 'production';
+          envVars.DEPLOYMENT_ID = '__DEPLOYMENT_ID__';
+          envVars.NEXT_TELEMETRY_DISABLED = '1';
+          
+          // Create PM2 config
+          const pm2Config = {
             apps: [{
-              name: '$NEW_PROCESS',
+              name: '__NEW_PROCESS__',
               script: './node_modules/.bin/next',
               args: 'start',
-              cwd: '$NEW_DEPLOYMENT_PATH',
+              cwd: '__NEW_DEPLOYMENT_PATH__',
               instances: 1,
-              env_file: '.env',  // This tells PM2 to load the .env file
-              env: {
-                NODE_ENV: 'production',
-                PORT: '$NEW_PORT',
-                DEPLOYMENT_ID: '$DEPLOYMENT_ID',
-                NEXT_TELEMETRY_DISABLED: '1'
-              },
+              env: envVars,
               max_memory_restart: '512M',
               min_uptime: '5s',
               max_restarts: 3,
@@ -433,23 +464,48 @@ jobs:
               kill_timeout: 5000,
               wait_ready: true,
               listen_timeout: 8000,
-              error_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-error.log',
-              out_file: '$DEPLOY_PATH/logs/$NEW_PROCESS-out.log',
+              error_file: '__DEPLOY_PATH__/logs/__NEW_PROCESS__-error.log',
+              out_file: '__DEPLOY_PATH__/logs/__NEW_PROCESS__-out.log',
               time: true
             }]
           };
-          EOFPM2
+          
+          fs.writeFileSync('ecosystem.config.cjs', 
+            'module.exports = ' + JSON.stringify(pm2Config, null, 2) + ';'
+          );
+          
+          console.log('✅ PM2 config created with', Object.keys(envVars).length, 'environment variables');
+          console.log('📋 Environment variables loaded:', Object.keys(envVars).join(', '));
+          EOFJS
+          
+          # Create PM2 config with all environment variables
+          node create_pm2_config.js
+          
+          # Replace placeholders in the generated config
+          sed -i "s|__NEW_PORT__|$NEW_PORT|g" ecosystem.config.cjs
+          sed -i "s|__DEPLOYMENT_ID__|$DEPLOYMENT_ID|g" ecosystem.config.cjs
+          sed -i "s|__NEW_PROCESS__|$NEW_PROCESS|g" ecosystem.config.cjs
+          sed -i "s|__NEW_DEPLOYMENT_PATH__|$NEW_DEPLOYMENT_PATH|g" ecosystem.config.cjs
+          sed -i "s|__DEPLOY_PATH__|$DEPLOY_PATH|g" ecosystem.config.cjs
+          
+          # Show PM2 config (first 20 lines)
+          echo "🔍 PM2 config preview:"
+          head -20 ecosystem.config.cjs
           
           # Start new process
           echo "🚀 Starting $NEW_PROCESS on port $NEW_PORT..."
           pm2 start ecosystem.config.cjs
           
           # Wait a moment for the process to start
-          sleep 2
+          sleep 3
           
           # Debug: Check if environment variables are loaded
           echo "🔍 Checking environment variables in PM2 process..."
-          pm2 show $NEW_PROCESS | grep -A 20 "Environment:" || echo "Could not retrieve environment info"
+          pm2 show $NEW_PROCESS | grep -A 50 "Environment:" || echo "Could not retrieve environment info"
+          
+          # Test if the application can access environment variables
+          echo "🔍 Testing environment variable access..."
+          curl -s "http://localhost:$NEW_PORT" >/dev/null 2>&1 && echo "✅ Application responding" || echo "⚠️ Application not responding yet"
           
           # Health check function
           health_check() {
@@ -470,7 +526,7 @@ jobs:
             
             echo "❌ Health check failed after $max_attempts attempts"
             echo "🔍 PM2 logs for debugging:"
-            pm2 logs $NEW_PROCESS --lines 20
+            pm2 logs $NEW_PROCESS --lines 30
             return 1
           }
           
@@ -539,16 +595,18 @@ jobs:
             
             # Keep only 2 most recent deployments (final cleanup)
             echo "🧹 Final cleanup - keeping only 2 most recent deployments..."
-            cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +2 | xargs -r rm -rf
+            cd "$DEPLOY_PATH/deployments" && ls -t | tail -n +3 | xargs -r rm -rf
             
             echo "🎉 Deployment completed successfully!"
             echo "📂 Current deployments:"
             ls -la "$DEPLOY_PATH/deployments"
             
-            # Final environment check
+            # Final environment verification
             echo "🔍 Final environment verification:"
             echo "📄 .env file exists: $([ -f "$NEW_DEPLOYMENT_PATH/.env" ] && echo "✅ YES" || echo "❌ NO")"
             echo "📄 PM2 process running: $(pm2 describe $NEW_PROCESS >/dev/null 2>&1 && echo "✅ YES" || echo "❌ NO")"
+            echo "📄 Environment variables in PM2:"
+            pm2 show $NEW_PROCESS | grep -A 10 "Environment:" | head -10
             
           else
             echo "❌ Nginx configuration test failed"
@@ -586,30 +644,35 @@ jobs:
           BRANCH="${{ needs.build.outputs.branch }}"
           DEPLOY_PATH="${{ steps.env-setup.outputs.deploy-path }}"
           UPSTREAM_NAME="${{ steps.env-setup.outputs.upstream-name }}"
+          PROCESS_NAME="${{ steps.env-setup.outputs.process-name }}"
           
           ssh deploy << VERIFY_SCRIPT
             echo "📊 PM2 Status:"
-            pm2 status | grep "${{ steps.env-setup.outputs.process-name }}" || echo "No processes found"
+            pm2 status | grep "$PROCESS_NAME" || echo "No processes found"
             
             echo ""
             echo "🔧 Nginx Upstream Config:"
             cat /etc/nginx/conf.d/$UPSTREAM_NAME.conf 2>/dev/null || echo "No upstream config"
             
             echo ""
-            echo "📂 Deployment Directory (should show only 2 most recent):"
-            ls -la $DEPLOY_PATH/deployments
-            
-            echo ""
-            echo "📂 Current Symlink:"
-            ls -la $DEPLOY_PATH/current
-            
-            echo ""
             echo "📂 Environment File Check:"
             if [ -f "$DEPLOY_PATH/current/.env" ]; then
               echo "✅ .env file exists in current deployment"
               echo "📄 .env file size: \$(wc -l < $DEPLOY_PATH/current/.env) lines"
+              echo "📄 Sample variables (non-sensitive):"
+              grep -v -E "(PASSWORD|SECRET|KEY|TOKEN|API)" $DEPLOY_PATH/current/.env | head -5 || echo "No non-sensitive variables found"
             else
               echo "❌ .env file missing in current deployment"
+            fi
+            
+            echo ""
+            echo "🔍 PM2 Environment Variables:"
+            CURRENT_PROCESS=\$(pm2 list | grep "$PROCESS_NAME" | grep "online" | awk '{print \$2}' | head -1)
+            if [ -n "\$CURRENT_PROCESS" ]; then
+              echo "📋 Current process: \$CURRENT_PROCESS"
+              pm2 show \$CURRENT_PROCESS | grep -A 20 "Environment:" | head -20
+            else
+              echo "❌ No running process found"
             fi
             
             echo ""
