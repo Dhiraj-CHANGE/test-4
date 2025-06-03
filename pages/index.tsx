@@ -34,7 +34,7 @@ export default function Home() {
             .
           </li>
           <li className="tracking-[-.01em]">
-            VERCEL CICD dev-8 {process.env.NEXT_PUBLIC_NODE_ENV} :-  check
+            VERCEL CICD dev-8 {process.env.NEXT_PUBLIC_NODE_ENV} :-check
           </li>
         </ol>
         <div className="flex gap-4 items-center flex-col sm:flex-row">
